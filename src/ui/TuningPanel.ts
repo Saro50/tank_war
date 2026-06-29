@@ -109,6 +109,7 @@ export class TuningPanel {
     Object.assign(header.style, headerStyle);
     header.textContent = '🎛 坦克调参';
     const body = document.createElement('div');
+    body.style.display = 'none'; // 默认收起，点击标题展开
     header.onclick = (): void => {
       body.style.display = body.style.display === 'none' ? 'block' : 'none';
     };

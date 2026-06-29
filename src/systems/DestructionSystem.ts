@@ -32,6 +32,22 @@ const brickMat = new MeshStandardMaterial({
 interface Brick {
   body: RAPIER.RigidBody;
   mesh: Mesh;
+  /** 原始 y(砌好后静止位置)，用于判定砖块是否被炸离原位 */
+  originY: number;
+}
+
+/**
+ * 房屋：把屋顶瓦块与承重砖关联起来。
+ * 屋顶是 fixed 刚体没有"支撑"概念，需手动判定承重砖是否被掏空，
+ * 被掏空则活化屋顶让它落下(否则永远浮空)。
+ */
+interface House {
+  /** 该房屋的屋顶瓦块/屋脊(瓦块句柄引用 roofTiles 中的对象) */
+  tiles: { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[];
+  /** 底部承重砖(最低一层墙砖)；底部没了屋顶就失去支撑 */
+  loadBearing: Brick[];
+  /** 屋顶是否已塌(塌过一次就不再判定) */
+  collapsed: boolean;
 }
 
 /**
@@ -59,6 +75,8 @@ export class DestructionSystem {
   private readonly fenceByCollider = new Map<number, FencePost>();
   /** 屋顶瓦块(被爆炸活化掉落 = 破洞) */
   private roofTiles: { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[] = [];
+  /** 房屋(屋顶↔承重砖关联，用于检测底部被掏空→屋顶塌落) */
+  private houses: House[] = [];
   private fragments: Fragment[] = [];
 
   constructor(physics: PhysicsWorld, render: RenderScene) {
@@ -84,12 +102,12 @@ export class DestructionSystem {
    * 创建砖墙房子(四面墙，砖块独立堆叠，错缝砌筑)
    * @param center 房子中心(地面层 y)
    * @param house  {x:宽, y:高, z:深}
-   * @returns 砖块总数
+   * @returns 砖块总数 + 底层承重砖(供 addHouse 关联屋顶用)
    */
   addBrickHouse(
     center: { x: number; y: number; z: number },
     house: { x: number; y: number; z: number },
-  ): number {
+  ): { count: number; loadBearing: Brick[] } {
     const bx = CONFIG.destruction.brick.size.x;
     const by = CONFIG.destruction.brick.size.y;
     const w = house.x;
@@ -106,27 +124,33 @@ export class DestructionSystem {
     const zMax = center.z + d / 2 - bx / 2;
 
     let count = 0;
+    const loadBearing: Brick[] = [];
     for (let j = 0; j < rows; j++) {
       const off = (j % 2) * (bx / 2); // 错缝
       const py = center.y + (j + 0.5) * by;
+      const isLoadBearing = j === 0; // 最低一层是承重层：失去它屋顶就悬空
       // 前后墙(砖长沿 x)
       for (let i = 0; i < colsA; i++) {
         const px = center.x - w / 2 + (i + 0.5) * bx + off;
         if (px < xMin || px > xMax) continue;
-        this.createBrick(px, py, center.z + d / 2, brickGeoA, bx / 2, by / 2, CONFIG.destruction.brick.size.z / 2);
-        this.createBrick(px, py, center.z - d / 2, brickGeoA, bx / 2, by / 2, CONFIG.destruction.brick.size.z / 2);
+        const b1 = this.createBrick(px, py, center.z + d / 2, brickGeoA, bx / 2, by / 2, CONFIG.destruction.brick.size.z / 2);
+        const b2 = this.createBrick(px, py, center.z - d / 2, brickGeoA, bx / 2, by / 2, CONFIG.destruction.brick.size.z / 2);
+        count += 2;
+        if (isLoadBearing) loadBearing.push(b1, b2);
       }
       // 左右墙(砖长沿 z)
       for (let i = 0; i < colsB; i++) {
         const pz = center.z - d / 2 + (i + 0.5) * bx + off;
         if (pz < zMin || pz > zMax) continue;
-        this.createBrick(center.x - w / 2, py, pz, brickGeoB, CONFIG.destruction.brick.size.z / 2, by / 2, bx / 2);
-        this.createBrick(center.x + w / 2, py, pz, brickGeoB, CONFIG.destruction.brick.size.z / 2, by / 2, bx / 2);
+        const b1 = this.createBrick(center.x - w / 2, py, pz, brickGeoB, CONFIG.destruction.brick.size.z / 2, by / 2, bx / 2);
+        const b2 = this.createBrick(center.x + w / 2, py, pz, brickGeoB, CONFIG.destruction.brick.size.z / 2, by / 2, bx / 2);
+        count += 2;
+        if (isLoadBearing) loadBearing.push(b1, b2);
       }
     }
 
-    log.info('brick house built', { bricks: count, house });
-    return count;
+    log.info('brick house built', { bricks: count, loadBearing: loadBearing.length, house });
+    return { count, loadBearing };
   }
 
   /** 创建水泥塔楼(块状渐进破坏) */
@@ -169,8 +193,10 @@ export class DestructionSystem {
     center: { x: number; y: number; z: number },
     size: { x: number; y: number; z: number },
   ): void {
-    this.addBrickHouse(center, size);
-    this.buildRoof(center, size);
+    const { loadBearing } = this.addBrickHouse(center, size);
+    const tiles = this.buildRoof(center, size);
+    // 关联屋顶↔承重砖：底部墙砖被掏空时屋顶失去支撑 → 活化塌落
+    this.houses.push({ tiles, loadBearing, collapsed: false });
   }
 
   /**
@@ -184,7 +210,7 @@ export class DestructionSystem {
   private buildRoof(
     center: { x: number; y: number; z: number },
     size: { x: number; y: number; z: number },
-  ): void {
+  ): { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[] {
     const cfg = CONFIG.destruction.house;
     const top = center.y + size.y;
     const eave = cfg.eave;
@@ -197,6 +223,12 @@ export class DestructionSystem {
     const segLen = fullZ / segs;
     const tileGeo = new BoxGeometry(slopeLen, 0.08, segLen * 0.94);
     const tileMat = new MeshStandardMaterial({ color: 0x5a3a2a, roughness: 0.9, metalness: 0 });
+    // 本栋屋顶的瓦块(同时登记全局 roofTiles 供爆炸破洞用，并返回给 addHouse 做承重关联)
+    const tiles: { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[] = [];
+    const addTile = (t: { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }): void => {
+      this.roofTiles.push(t);
+      tiles.push(t);
+    };
 
     // 两坡瓦块(rotation.z = -side*slope：瓦块贴合坡面，脊高端、檐低端，不悬空)
     for (const side of [-1, 1]) {
@@ -227,7 +259,7 @@ export class DestructionSystem {
         mesh.receiveShadow = true;
         this.render.scene.add(mesh);
         SyncBridge.bind(body, mesh);
-        this.roofTiles.push({ body, mesh, alive: true });
+        addTile({ body, mesh, alive: true });
       }
     }
 
@@ -268,7 +300,9 @@ export class DestructionSystem {
     rMesh.castShadow = true;
     this.render.scene.add(rMesh);
     SyncBridge.bind(rBody, rMesh);
-    this.roofTiles.push({ body: rBody, mesh: rMesh, alive: true });
+    addTile({ body: rBody, mesh: rMesh, alive: true });
+
+    return tiles;
   }
 
   /** 创建单块砖(动态刚体 + 网格)，高摩擦防滑、高密度有重量感 */
@@ -280,7 +314,7 @@ export class DestructionSystem {
     hx: number,
     hy: number,
     hz: number,
-  ): void {
+  ): Brick {
     const cfg = CONFIG.destruction.brick;
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y, z)
@@ -299,7 +333,9 @@ export class DestructionSystem {
     mesh.receiveShadow = true;
     this.render.scene.add(mesh);
     SyncBridge.bind(body, mesh);
-    this.bricks.push({ body, mesh });
+    const brick: Brick = { body, mesh, originY: y };
+    this.bricks.push(brick);
+    return brick;
   }
 
   /** 爆炸响应：箱子破碎 + 砖块径向衰减冲量 */
@@ -385,8 +421,36 @@ export class DestructionSystem {
       roofHit++;
     }
 
-    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || roofHit > 0) {
-      log.info('explosion', { destroyed, bricksHit, towersHit, treesHit, roofHit, radius });
+    // 承重检测：爆炸会松动/移除砖块，若某栋房屋底部承重砖大量失效，
+    // 屋顶(fixed)失去支撑 → 活化整栋屋顶让它塌落(否则永远浮空)。
+    let roofsCollapsed = 0;
+    for (const house of this.houses) {
+      if (house.collapsed) continue;
+      // 统计仍在原位的承重砖(位移 < 半块高 视为尚未失效)
+      let standing = 0;
+      for (const b of house.loadBearing) {
+        const t = b.body.translation();
+        if (Math.abs(t.y - b.originY) < 0.2) standing++;
+      }
+      // 承重砖失效超 60% → 屋顶塌(留 40% 也站不住，符合掏空承重即塌的直觉)
+      if (standing / house.loadBearing.length < 0.4) {
+        house.collapsed = true;
+        for (const tile of house.tiles) {
+          if (!tile.alive) continue;
+          tile.alive = false;
+          tile.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+          // 微下沉冲量，模拟失去支撑后自然下坠(非爆炸式横飞)
+          tile.body.applyImpulse(
+            { x: (Math.random() - 0.5) * 0.6, y: -1.0, z: (Math.random() - 0.5) * 0.6 },
+            true,
+          );
+          roofsCollapsed++;
+        }
+      }
+    }
+
+    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || roofHit > 0 || roofsCollapsed > 0) {
+      log.info('explosion', { destroyed, bricksHit, towersHit, treesHit, roofHit, roofsCollapsed, radius });
     }
   }
 

@@ -51,7 +51,7 @@ async function main(): Promise<void> {
 
   startLoop(physics, render, input, tank, controller, weapon, shake, destruction);
   log.info('boot complete', {
-    hint: '↑↓←→ 移动 / U I 炮塔 / O P 炮管 / Space 开火',
+    hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火',
   });
 }
 

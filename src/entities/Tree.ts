@@ -37,6 +37,9 @@ export class Tree {
   /** collider handle，供 DestructionSystem 碰撞反查 */
   readonly colliderHandle: number;
   private readonly body: RAPIER.RigidBody;
+  private readonly group: Group;
+  private readonly physics: PhysicsWorld;
+  private readonly render: RenderScene;
 
   constructor(
     physics: PhysicsWorld,
@@ -44,6 +47,8 @@ export class Tree {
     pos: { x: number; y: number; z: number },
   ) {
     ensureShared();
+    this.physics = physics;
+    this.render = render;
     const cfg = CONFIG.destruction.tree;
     // body/group 中心 = 树干中心(地面 y 上方 trunkHeight/2)
     const cx = pos.x;
@@ -65,19 +70,27 @@ export class Tree {
     this.colliderHandle = col.handle;
 
     // 渲染：group(原点=树干中心) + 树干(中心) + 树冠(上方)
-    const group = new Group();
-    group.position.set(cx, cy, cz);
+    this.group = new Group();
+    this.group.position.set(cx, cy, cz);
     const trunk = new Mesh(sharedTrunkGeo!, sharedTrunkMat!);
     trunk.castShadow = true;
     trunk.receiveShadow = true;
-    group.add(trunk);
+    this.group.add(trunk);
     const crown = new Mesh(sharedCrownGeo!, sharedCrownMat!);
     crown.position.y = cfg.trunkHeight / 2 + cfg.crownHeight / 2 - 0.2;
     crown.castShadow = true;
-    group.add(crown);
+    this.group.add(crown);
 
-    render.scene.add(group);
-    SyncBridge.bind(this.body, group);
+    render.scene.add(this.group);
+    SyncBridge.bind(this.body, this.group);
+  }
+
+  /** 彻底销毁(场景重置用)：解绑+移除刚体+移除网格。共享 geo/mat 单例不释放。 */
+  dispose(): void {
+    SyncBridge.unbind(this.body);
+    this.physics.world.removeRigidBody(this.body);
+    this.render.scene.remove(this.group);
+    this.state = 'fallen';
   }
 
   /** 被爆炸波及：fixed 转 dynamic + 沿爆心水平方向推倒 + 上抬 + 随机扭矩(翻滚倒地) */

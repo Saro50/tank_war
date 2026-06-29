@@ -48,6 +48,17 @@ export class InputSystem {
     log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火' });
   }
 
+  /** 解绑监听器(场景重置/卸载用)，防 hot-reload 后重复监听与按键卡住 */
+  detach(): void {
+    if (!this.attached) return;
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onBlur);
+    this.keys.clear();
+    this.attached = false;
+    log.debug('input detached');
+  }
+
   get state(): InputState {
     return {
       forward: (this.has('ArrowUp') ? 1 : 0) - (this.has('ArrowDown') ? 1 : 0),

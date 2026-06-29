@@ -34,10 +34,15 @@ interface Block {
 
 export class Tower {
   state: 'intact' | 'destroyed' = 'intact';
+  private readonly physics: PhysicsWorld;
+  private readonly render: RenderScene;
   private readonly center: { x: number; y: number; z: number };
   private readonly blocks: Block[] = [];
   private readonly totalBlocks: number;
   private lostBlocks = 0;
+  // 地基底座(fixed，倒塌后保留)；dispose() 时一并清理
+  private baseBody?: RAPIER.RigidBody;
+  private baseMesh?: Mesh;
 
   // 共享几何/材质(所有块同尺寸)
   private readonly blockGeo: BoxGeometry;
@@ -51,27 +56,29 @@ export class Tower {
     baseSize: { x: number; y: number; z: number },
   ) {
     this.center = { ...pos };
+    this.physics = physics;
+    this.render = render;
     const cfg = CONFIG.destruction.tower;
 
     // 地基底座(fixed，永远稳固)
     const baseY = pos.y - size.y / 2 - baseSize.y / 2;
-    const baseBody = physics.world.createRigidBody(
+    this.baseBody = physics.world.createRigidBody(
       RAPIER.RigidBodyDesc.fixed().setTranslation(pos.x, baseY, pos.z),
     );
     physics.world.createCollider(
       RAPIER.ColliderDesc.cuboid(baseSize.x / 2, baseSize.y / 2, baseSize.z / 2)
         .setFriction(0.9)
         .setRestitution(0),
-      baseBody,
+      this.baseBody,
     );
-    const baseMesh = new Mesh(
+    this.baseMesh = new Mesh(
       new BoxGeometry(baseSize.x, baseSize.y, baseSize.z),
       new MeshStandardMaterial({ color: 0x6f6f6f, roughness: 1, metalness: 0.05 }),
     );
-    baseMesh.position.set(pos.x, baseY, pos.z);
-    baseMesh.castShadow = true;
-    baseMesh.receiveShadow = true;
-    render.scene.add(baseMesh);
+    this.baseMesh.position.set(pos.x, baseY, pos.z);
+    this.baseMesh.castShadow = true;
+    this.baseMesh.receiveShadow = true;
+    render.scene.add(this.baseMesh);
 
     // 网格切块(全 fixed)：三轴细分，块越小弹坑越细腻
     const pieces = gridFracture(size, cfg.gridX, cfg.gridY, cfg.gridZ);
@@ -232,6 +239,9 @@ export class Tower {
       );
       n++;
     }
+    // collapse() 把剩余存活块一并标死，必须同步累加 lostBlocks，
+    // 否则倒塌后 integrity 仍按旧 lostBlocks 计算 → 数值偏高失真。
+    this.lostBlocks += n;
     log.info('tower COLLAPSED', { remaining: n });
   }
 
@@ -240,5 +250,34 @@ export class Tower {
     return this.totalBlocks === 0
       ? 0
       : 1 - this.lostBlocks / this.totalBlocks;
+  }
+
+  /**
+   * 彻底销毁(场景重置用)：移除全部 block + 地基，释放共享/独有资源。
+   * 移除倒塌后散落的动态刚体，防止物理世界长期累积碰撞体。
+   */
+  dispose(): void {
+    for (const b of this.blocks) {
+      SyncBridge.unbind(b.body);
+      this.physics.world.removeRigidBody(b.body);
+      this.render.scene.remove(b.mesh);
+    }
+    this.blocks.length = 0;
+    // 共享 geo/mat：所有 block 用同一份，释放一次即可
+    this.blockGeo.dispose();
+    this.blockMat.dispose();
+    // 地基
+    if (this.baseBody) {
+      SyncBridge.unbind(this.baseBody);
+      this.physics.world.removeRigidBody(this.baseBody);
+      this.baseBody = undefined;
+    }
+    if (this.baseMesh) {
+      this.render.scene.remove(this.baseMesh);
+      this.baseMesh.geometry.dispose();
+      (this.baseMesh.material as MeshStandardMaterial).dispose();
+      this.baseMesh = undefined;
+    }
+    this.state = 'destroyed';
   }
 }

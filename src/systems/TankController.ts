@@ -83,14 +83,14 @@ export class TankController {
   aimAndCamera(input: InputState, dt: number): void {
     const cfg = CONFIG.tank;
 
-    // 炮塔水平旋转（U/I）：角速度 lerp 实现惯性
+    // 炮塔水平旋转（Q/W）：角速度 lerp 实现惯性
     // 按键角速度渐增到 turnSpeed，松键渐衰减 → 加速感 + 滑转感
     const omegaTarget = input.turretDir * cfg.turret.turnSpeed;
     this.turretOmega = lerp(this.turretOmega, omegaTarget, cfg.turret.omegaLerp);
     this.turretAngle = wrapAngle(this.turretAngle + this.turretOmega * dt);
     this.tank.turret.rotation.y = this.turretAngle;
 
-    // 炮管俯仰（O/P，按住持续抬/放，限位）
+    // 炮管俯仰（A/S，按住持续抬/放，限位）
     this.barrelPitch = clamp(
       this.barrelPitch + input.barrelDir * cfg.barrel.pitchSpeed * dt,
       cfg.barrel.pitchRange.min,
@@ -124,7 +124,7 @@ export class TankController {
    */
   private updateSway(dt: number): void {
     const cfg = CONFIG.tank.sway;
-    const accel = (this.curLin - this.prevLin) / dt; // 线加速度
+    const accel = (this.curLin - this.prevLin) / Math.max(dt, 1e-4); // 线加速度(下限保护防首帧除零/极大值)
     this.prevLin = this.curLin;
     // 加速(accel>0)→抬头(rotation.x 负)；减速→点头(rotation.x 正)
     const targetPitch = -accel * cfg.pitchScale;

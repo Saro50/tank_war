@@ -78,4 +78,10 @@ export class RenderScene {
   render(): void {
     this.renderer.render(this.scene, this.camera);
   }
+
+  /** 销毁渲染资源(场景重置/卸载用)：移除 resize 监听并释放 WebGL 上下文 */
+  dispose(): void {
+    window.removeEventListener('resize', this.onResize);
+    this.renderer.dispose();
+  }
 }

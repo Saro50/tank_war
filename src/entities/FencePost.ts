@@ -31,6 +31,9 @@ export class FencePost {
   state: 'intact' | 'knocked' = 'intact';
   readonly colliderHandle: number;
   private readonly body: RAPIER.RigidBody;
+  private readonly group: Group;
+  private readonly physics: PhysicsWorld;
+  private readonly render: RenderScene;
 
   constructor(
     physics: PhysicsWorld,
@@ -38,6 +41,8 @@ export class FencePost {
     pos: { x: number; y: number; z: number },
   ) {
     ensureShared();
+    this.physics = physics;
+    this.render = render;
     const cfg = CONFIG.destruction.fence;
     const cx = pos.x;
     const cy = pos.y + cfg.postHeight / 2;
@@ -65,9 +70,18 @@ export class FencePost {
     tip.position.y = cfg.postHeight / 2 + 0.11;
     tip.castShadow = true;
     group.add(tip);
+    this.group = group;
 
-    render.scene.add(group);
-    SyncBridge.bind(this.body, group);
+    render.scene.add(this.group);
+    SyncBridge.bind(this.body, this.group);
+  }
+
+  /** 彻底销毁(场景重置用)：解绑+移除刚体+移除网格。共享 geo/mat 单例不释放。 */
+  dispose(): void {
+    SyncBridge.unbind(this.body);
+    this.physics.world.removeRigidBody(this.body);
+    this.render.scene.remove(this.group);
+    this.state = 'knocked';
   }
 
   /** 被坦克/物体撞击 → 转 dynamic + 随机水平方向翻倒 */

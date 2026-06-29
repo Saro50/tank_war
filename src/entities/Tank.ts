@@ -6,11 +6,13 @@ import {
   CylinderGeometry,
   Float32BufferAttribute,
   Group,
+  Material,
   Mesh,
   MeshStandardMaterial,
   Object3D,
   PlaneGeometry,
   RepeatWrapping,
+  Texture,
   Vector3,
 } from 'three';
 import { CONFIG } from '../config';
@@ -72,12 +74,17 @@ export class Tank {
   private readonly _muzzleWorld = new Vector3();
   private static readonly _mDirA = new Vector3(); // 炮口方向计算复用
   private static readonly _mDirB = new Vector3();
+  // dispose 用：持有物理/渲染入口
+  private readonly physics: PhysicsWorld;
+  private readonly render: RenderScene;
 
   constructor(
     physics: PhysicsWorld,
     render: RenderScene,
     spawn: { x: number; y: number; z: number },
   ) {
+    this.physics = physics;
+    this.render = render;
     const cfg = CONFIG.tank;
     const bh = cfg.bodyHalf;
 
@@ -425,6 +432,43 @@ export class Tank {
     const f = CONFIG.tank.track.rollScale;
     this.leftTrackTex.offset.x += leftVel * dt * f;
     this.rightTrackTex.offset.x += rightVel * dt * f;
+  }
+
+  /**
+   * 彻底销毁(场景重置用)：解绑车身刚体、移除网格、释放全部 GPU 资源。
+   * 坦克部件众多(几十个 mesh + 多套独有材质/CanvasTexture/几何)，逐个手维护易遗漏，
+   * 故遍历 group 收集所有 geometry / material / material.map 去重后统一释放。
+   * 共享几何(直段box/主动轮/负重轮/格栅/阿富汗石/编号贴花)会被多次引用，
+   * 用 Set 去重保证每个只 dispose 一次。
+   */
+  dispose(): void {
+    SyncBridge.unbind(this.body);
+    this.physics.world.removeRigidBody(this.body);
+    this.render.scene.remove(this.group);
+
+    const geos = new Set<BufferGeometry>();
+    const mats = new Set<Material>();
+    const texs = new Set<Texture>();
+    this.group.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!mesh.isMesh) return;
+      if (mesh.geometry) geos.add(mesh.geometry);
+      const m = mesh.material;
+      const collect = (mm: Material): void => {
+        mats.add(mm);
+        // map 仅在带纹理的材质子类上(如 MeshStandardMaterial)，基类 Material 无此属性
+        const map = (mm as { map?: Texture }).map;
+        if (map) texs.add(map);
+      };
+      if (Array.isArray(m)) {
+        for (const mm of m) collect(mm);
+      } else if (m) {
+        collect(m);
+      }
+    });
+    for (const t of texs) t.dispose();
+    for (const m of mats) m.dispose();
+    for (const g of geos) g.dispose();
   }
 }
 

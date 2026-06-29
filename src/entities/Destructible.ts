@@ -148,6 +148,9 @@ export class Destructible {
     const ty = Math.abs(dy) > 0.01 ? hy / Math.abs(dy) : Infinity;
     const tz = Math.abs(dz) > 0.01 ? hz / Math.abs(dz) : Infinity;
     const sd = Math.min(tx, ty, tz);
+    // 爆心≈箱体几何中心时三轴分量都极小 → sd=Infinity → 弹坑退化为 NaN/无限远，
+    // 此种退化情形直接跳过贴弹坑(视觉上可忽略，且避免脏矩阵)。
+    if (!Number.isFinite(sd)) return;
     const sx = c.x + dx * sd,
       sy = c.y + dy * sd,
       sz = c.z + dz * sd;
@@ -171,6 +174,9 @@ export class Destructible {
     SyncBridge.unbind(this.body);
     this.physics.world.removeRigidBody(this.body);
     this.render.scene.remove(this.mesh);
+    // 释放主体独有几何/材质(防止每次破碎泄漏 GPU 资源)
+    this.mesh.geometry.dispose();
+    (this.mesh.material as MeshStandardMaterial).dispose();
     for (const cr of this.craters) this.render.scene.remove(cr);
     this.craters = [];
 
@@ -248,6 +254,37 @@ export class Destructible {
 
     log.info('COLLAPSED', { fragments: fragments.length, at: boxPos });
     return fragments;
+  }
+
+  /**
+   * 彻底销毁(场景重置用)：移除地基刚体/网格并释放其独有几何/材质。
+   * 与 destroy() 的区别：destroy() 触发倒塌并保留地基；dispose() 连地基一起清。
+   * 倒塌前(仍 intact)调用会一并移除主体(body/mesh)。
+   */
+  dispose(): void {
+    if (this.state === 'intact') {
+      // 未倒塌：主体还在，先解绑移除并释放
+      SyncBridge.unbind(this.body);
+      this.physics.world.removeRigidBody(this.body);
+      this.render.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      (this.mesh.material as MeshStandardMaterial).dispose();
+      for (const cr of this.craters) this.render.scene.remove(cr);
+      this.craters = [];
+      this.state = 'destroyed';
+    }
+    // 地基(建筑类)：独立移除并释放独有 geo/mat
+    if (this.baseBody) {
+      SyncBridge.unbind(this.baseBody);
+      this.physics.world.removeRigidBody(this.baseBody);
+      this.baseBody = undefined;
+    }
+    if (this.baseMesh) {
+      this.render.scene.remove(this.baseMesh);
+      this.baseMesh.geometry.dispose();
+      (this.baseMesh.material as MeshStandardMaterial).dispose();
+      this.baseMesh = undefined;
+    }
   }
 }
 
