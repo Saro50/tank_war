@@ -5,6 +5,7 @@ import { PhysicsWorld } from './core/PhysicsWorld';
 import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
 import { Tank } from './entities/Tank';
+import { StaticTank } from './entities/StaticTank';
 import { InputSystem } from './systems/InputSystem';
 import { TankController } from './systems/TankController';
 import { WeaponSystem } from './systems/WeaponSystem';
@@ -38,9 +39,11 @@ async function main(): Promise<void> {
   // 村庄情景(在坦克之前创建，便于坦克出生在前方空地)
   const destruction = new DestructionSystem(physics, render);
   buildVillage(destruction);
+  buildStaticTanks(physics, render, destruction);
 
   const bh = CONFIG.tank.bodyHalf;
   const tank = new Tank(physics, render, { x: 0, y: bh.y + 0.1, z: -8 });
+  destruction.setTankCollider(tank.colliderHandle);
 
   const input = new InputSystem();
   input.attach();
@@ -104,7 +107,9 @@ function buildVillage(destruction: DestructionSystem): void {
     ...houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.size.x, h.size.z) })),
     { x: -30, z: -2, r: 3.5 },
     { x: 32, z: 4, r: 3.5 },
-    { x: 0, z: -8, r: 4 }, // 坦克出生点
+    { x: 0, z: -8, r: 4 }, // 玩家坦克出生点
+    { x: -8, z: -30, r: 4 }, // 静态虎式
+    { x: 8, z: -30, r: 4 }, // 静态 M1
   ];
   let placed = 0;
   let tries = 0;
@@ -125,6 +130,20 @@ function buildVillage(destruction: DestructionSystem): void {
     placed++;
   }
   log.info('village built', { houses: houses.length, trees: placed });
+}
+
+/** 两辆静态展示坦克(可破坏目标)，远南侧并排陈列，朝北面向村庄/玩家 */
+function buildStaticTanks(
+  physics: PhysicsWorld,
+  render: RenderScene,
+  destruction: DestructionSystem,
+): void {
+  // 朝向 +z(炮管指 +z = 面向村庄)。yaw=0 即默认朝向
+  const tiger = new StaticTank(physics, render, { x: -8, y: 0, z: -30 }, 0, 'tiger');
+  const abrams = new StaticTank(physics, render, { x: 8, y: 0, z: -30 }, 0, 'abrams');
+  destruction.addStaticTank(tiger);
+  destruction.addStaticTank(abrams);
+  log.info('static tanks placed', { tiger: { x: -8, z: -30 }, abrams: { x: 8, z: -30 } });
 }
 
 /** 四周环形山(静态背景，fixed collider 防坦克穿出地形) */

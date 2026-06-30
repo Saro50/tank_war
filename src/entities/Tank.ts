@@ -62,6 +62,8 @@ const log = Logger.create('Tank');
  */
 export class Tank {
   readonly body: RAPIER.RigidBody;
+  /** collider handle，供 DestructionSystem 识别坦克参与碰撞(撞击破坏用) */
+  readonly colliderHandle: number;
   readonly group: Group;
   /** C阶段：车身视觉摇晃 pivot(车体部件挂此，履带轮组不动)；controller 写 rotation */
   readonly hullSway: Group;
@@ -96,13 +98,15 @@ export class Tank {
       .enabledRotations(false, true, false)
       .setCcdEnabled(true);
     this.body = physics.world.createRigidBody(bodyDesc);
-    physics.world.createCollider(
+    const col = physics.world.createCollider(
       RAPIER.ColliderDesc.cuboid(bh.x, bh.y, bh.z)
         .setMass(cfg.mass)
         .setFriction(0.8)
-        .setRestitution(0.0),
+        .setRestitution(0.0)
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), // 撞击可破坏物需事件上报
       this.body,
     );
+    this.colliderHandle = col.handle;
 
     // ---- 2. 渲染层级(写实军事风：分材质 PBR + 多部件细节) ----
     this.group = new Group();
@@ -479,7 +483,7 @@ export class Tank {
  * 关键：链节块沿 canvas x(u=长度方向)分布，offset.x 才能让链节逐个滚过。
  * (此前画成横条纹 → 沿 u 无变化 → 滚动不可见，已修正)
  */
-function makeTrackTexture(repeat: number): CanvasTexture {
+export function makeTrackTexture(repeat: number): CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 64;
   c.height = 32;
@@ -511,7 +515,7 @@ function makeTrackTexture(repeat: number): CanvasTexture {
  *       → 全图像素级亮度噪点(模拟灰尘/磨损/掉漆)。
  * 返回 canvas，调用方包成 CanvasTexture 并按需设 repeat 控密度。
  */
-function makeCamouflageCanvas(
+export function makeCamouflageCanvas(
   p: { base: number; blobDark: number; blobMid: number },
   size = 256,
 ): HTMLCanvasElement {
@@ -568,7 +572,7 @@ function makeCamouflageCanvas(
  * 战术编号贴花 canvas(深底圆 + 浅色编号文字，圆外透明)
  * 配合材质 alphaTest 抠掉圆外区域，贴炮塔侧面。
  */
-function makeNumberDecalCanvas(text: string, size = 128): HTMLCanvasElement {
+export function makeNumberDecalCanvas(text: string, size = 128): HTMLCanvasElement {
   const cnv = document.createElement('canvas');
   cnv.width = size;
   cnv.height = size;
@@ -594,7 +598,7 @@ function makeNumberDecalCanvas(text: string, size = 128): HTMLCanvasElement {
  * 非共享顶点 + 每面独立 UV(沿用 makeTrapezoidGeometry 方案)，
  * 法线 flat → 装甲棱角锐利；三角形绕向保证外法线。
  */
-function makeWedgeGeometry(h: {
+export function makeWedgeGeometry(h: {
   bottomHalfX: number; topHalfX: number;
   bottomHalfZ: number; topHalfZ: number;
   height: number; centerY: number;
@@ -611,6 +615,65 @@ function makeWedgeGeometry(h: {
     [4, 7, 6, 5], // 顶 +y
     [0, 4, 5, 1], // 前 -z
     [3, 2, 6, 7], // 后 +z
+    [0, 3, 7, 4], // 左 -x
+    [1, 5, 6, 2], // 右 +x
+  ];
+  const faceUV = [
+    [0, 0], [1, 0], [1, 1], [0, 1],
+  ];
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const index: number[] = [];
+  for (const f of faces) {
+    const base = positions.length / 3;
+    for (let i = 0; i < 4; i++) {
+      const p = P[f[i]];
+      positions.push(p[0], p[1], p[2]);
+      uvs.push(faceUV[i][0], faceUV[i][1]);
+    }
+    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new Float32BufferAttribute(uvs, 2));
+  geo.setIndex(index);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * 楔形炮塔几何(前后非对称收窄,模拟现代/艺术化楔形炮塔)。
+ * 与 makeWedgeGeometry(前后对称)的区别:顶面在 z 方向前后独立收窄 ——
+ * frontHalfZ 大(正面厚、装甲近乎垂直)、backHalfZ 小(向后急剧收薄),
+ * 形成"前厚后薄"的真楔形轮廓,而非四面对称的截头锥。
+ *
+ * 坐标约定(与 makeWedgeGeometry 一致):+z 为炮塔前方(炮管指向)。
+ */
+export function makeWedgeTurretGeometry(h: {
+  bottomHalfX: number; topHalfX: number; // 底/顶 宽度半(左右对称)
+  bottomHalfZ: number; // 底面长度半(前后对称)
+  frontHalfZ: number; // 顶面前缘 z(+z 方向,正面厚度)
+  backHalfZ: number; // 顶面后缘 z(-z 方向,后部收薄)
+  height: number; centerY: number;
+}): BufferGeometry {
+  const {
+    bottomHalfX: bx, topHalfX: tx,
+    bottomHalfZ: bz, frontHalfZ: fz, backHalfZ: bkz,
+    height, centerY: cy,
+  } = h;
+  const yb = cy - height / 2;
+  const yt = cy + height / 2;
+  // 底面:前后对称的完整矩形(z = ±bz)
+  const P: number[][] = [
+    [-bx, yb, -bz], [bx, yb, -bz], [bx, yb, bz], [-bx, yb, bz], // 0-3 底
+    // 顶面:宽度收窄(tx),前后独立(fz≠bkz) → 非对称楔形
+    [-tx, yt, -bkz], [tx, yt, -bkz], [tx, yt, fz], [-tx, yt, fz], // 4-7 顶
+  ];
+  const faces: number[][] = [
+    [0, 1, 2, 3], // 底 -y
+    [4, 7, 6, 5], // 顶 +y
+    [0, 4, 5, 1], // 前 -z(后端面,较薄)
+    [3, 2, 6, 7], // 后 +z(前端面,较厚 → 正面装甲)
     [0, 3, 7, 4], // 左 -x
     [1, 5, 6, 2], // 右 +x
   ];

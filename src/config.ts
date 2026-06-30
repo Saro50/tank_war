@@ -334,6 +334,7 @@ export const CONFIG = {
     postRadius: 0.06, // 立柱半径
     density: 0.8, // 木质(轻)
     knockImpulse: 4, // 被撞倒下冲量
+    hitRadius: 2.0, // 爆炸波及半径(被炮弹/撞击震倒)
   },
   /** 房屋人字屋顶(南方农家风：陡坡排水 + 屋檐外延遮雨) */
   house: {
@@ -341,6 +342,122 @@ export const CONFIG = {
     eave: 0.7, // 屋檐外延(超出墙体一截，四面挑出遮雨遮阳)
     tileDensity: 2, // 瓦块密度
   },
+  },
+
+  /** 静态展示坦克(可破坏目标：HP 归零被炸翻) */
+  staticTank: {
+    /** 被击毁时受爆心方向的爆炸冲量(把坦克掀翻/炸飞) */
+    destroyImpulse: 28,
+    /** 德国虎式坦克(二战)：垂直方盒装甲、长车身、长88mm炮、德军迷彩 */
+    tiger: {
+      // 车身:垂直方盒装甲(写实虎式),加厚(高 1.3)显得敦实厚重有分量;
+      // 整体按比例缩小到与玩家 T-14 接近(全长≈4.8m < 原 5.8m),不再明显大于玩家。
+      hull: {
+        bottomHalfX: 1.18, topHalfX: 1.18, // 略加宽(厚重感),垂直装甲
+        bottomHalfZ: 2.4, topHalfZ: 2.4, // 长度缩(原2.9)
+        height: 1.3, centerY: 0.9, // 再加厚(1.15→1.3)+ 上移,座于履带间更敦实厚重
+      },
+      track: { halfX: 0.28, halfY: 0.3, halfZ: 2.4, offsetX: 1.18, centerY: 0.45, texRepeat: 12 },
+      roadWheel: { count: 8, radius: 0.3, halfWidth: 0.16, offsetX: 1.18, centerY: 0.45, zSpan: 2.1 },
+      /** 交错式负重轮(虎式标志)：内排轮偏移半距,视觉上呈交错排列 */
+      roadWheelStagger: { radius: 0.26, halfWidth: 0.16, offsetX: 1.05, centerY: 0.45, zSpan: 2.1, zHalfStep: true },
+      fender: { halfX: 0.24, halfY: 0.05, halfZ: 2.45, offsetX: 1.36, centerY: 1.05 },
+      /** 侧裙板(遮住交错轮组,侧面更整洁有装甲感) */
+      sideSkirt: { halfX: 0.05, halfY: 0.45, halfZ: 2.2, offsetX: 1.4, centerY: 0.45 },
+      turret: {
+        offset: { x: 0, y: 1.55, z: -0.3 }, // 炮塔随加厚车体上移(1.36→1.55),坐稳车顶
+        // 炮塔主体:前后非对称楔形(正面厚、后部急剧收薄 → 真楔形,非对称截头锥)
+        // frontHalfZ 大=正面装甲厚、近乎垂直;backHalfZ 小=向后收薄成尖锐楔尾
+        body: { bottomHalfX: 0.78, topHalfX: 0.6, bottomHalfZ: 1.05, topHalfZ: 0.85, frontHalfZ: 0.85, backHalfZ: 0.45, height: 0.6, centerY: 0.3 },
+        /** 车长指挥塔(炮塔顶圆柱,虎式标志) */
+        cupola: { radius: 0.22, height: 0.2, x: 0, y: 0.7, z: -0.5 },
+        /** 无独立周视瞄准镜(二战坦克无此装置) */
+        sight: undefined,
+        /** 无装填手舱盖配置 */
+        loaderHatch: undefined,
+        /** 炮塔后部战斗室加宽段(与主体同宽,后延加厚 → H 形后部,H 形平面) */
+        bustle: { halfX: 0.78, halfY: 0.22, halfZ: 0.3, x: 0, y: 0.32, z: -1.15 },
+        /** 前脸厚防盾(88mm 炮根处加厚块,模拟虎式弧形防盾,避免前脸平板) */
+        frontShield: { halfX: 0.42, halfY: 0.32, halfZ: 0.18, x: 0, y: 0.32, z: 1.0 },
+      },
+      barrel: { offset: { x: 0, y: 0.25, z: 0.5 }, length: 3.0, radius: 0.09 }, // 88mm 长炮(随车身缩)
+      /** 炮口制退器(88mm 双室制退器,虎式标志) */
+      muzzleBrake: { radius: 0.13, length: 0.4 },
+      /** 无热护套(二战坦克用炮口制退器,不用热护套) */
+      thermalSleeve: undefined,
+      /** 炮盾(炮管根部加厚,防盾) */
+      mantlet: { radius: 0.17, halfZ: 0.32 },
+      colors: {
+        hull: 0x6b6a55, turret: 0x6b6a55,
+        camo: { base: 0x6b6a55, blobDark: 0x4a4a35, blobMid: 0x8a7d4a }, // 德军灰绿+褐黄
+        trackMetal: 0x333333, wheelRubber: 0x1a1a1a, wheelHub: 0x555555,
+        barrel: 0x4a4a35, detail: 0x2a2a20, fender: 0x5a5a45,
+      },
+      number: '231',
+      /** 贴花:德军黑十字(Balkenkreuz)贴炮塔两侧 */
+      decal: { cross: true, crossColor: 0x1a1a1a },
+      maxHp: 200, // 重装甲(虎式正面 100mm)→ 很抗揍
+    },
+    /** M1 艾布拉姆斯(现代主战)：倾斜复合装甲、楔形炮塔、7对大负重轮、沙漠迷彩 */
+    abrams: {
+      hull: {
+        bottomHalfX: 1.35, topHalfX: 1.15, // 略加宽(厚重感)
+        bottomHalfZ: 2.6, topHalfZ: 2.4,
+        height: 1.0, centerY: 0.85, // 加厚(原0.75→1.0)+上移,座于履带间更敦实厚重
+        /** 车首驾驶舱凸起(M1 前上装甲板上的驾驶舱,标志性前凸) */
+        frontHatch: { halfX: 0.4, halfY: 0.22, halfZ: 0.45, x: 0, y: 1.3, z: 1.6 },
+      },
+      track: { halfX: 0.32, halfY: 0.32, halfZ: 2.6, offsetX: 1.35, centerY: 0.4, texRepeat: 13 },
+      roadWheel: { count: 7, radius: 0.36, halfWidth: 0.2, offsetX: 1.35, centerY: 0.4, zSpan: 2.2 },
+      /** 托带轮(M1 履带上方回程支撑轮,现代坦克标志,4-6 个小轮) */
+      returnRoller: { radius: 0.12, halfWidth: 0.1, offsetX: 1.32, centerY: 0.72, count: 5, zSpan: 1.6 },
+      /** 前主动轮带齿、后诱导轮实心盘(M1 履带端轮差异化) */
+      toothedSprocket: true,
+      /** 无交错轮(现代坦克用扭杆悬挂均匀排列) */
+      roadWheelStagger: undefined,
+      fender: { halfX: 0.28, halfY: 0.05, halfZ: 2.65, offsetX: 1.55, centerY: 0.82 },
+      /** 侧裙板(M1 标志:只遮履带上半,露出下排大负重轮,现代坦克特征) */
+      sideSkirt: { halfX: 0.06, halfY: 0.26, halfZ: 2.3, offsetX: 1.62, centerY: 0.72 },
+      turret: {
+        offset: { x: 0, y: 1.35, z: 0.1 }, // 炮塔随加厚车体上移(原1.0→1.35),坐稳车顶
+        // 炮塔主体:前后非对称楔形(正面厚装甲、后部收薄成楔尾,M1 炮塔本质前厚后薄)
+        body: { bottomHalfX: 0.95, topHalfX: 0.68, bottomHalfZ: 1.1, topHalfZ: 0.85, frontHalfZ: 0.85, backHalfZ: 0.4, height: 0.7, centerY: 0.35 },
+        /** 车长指挥塔(M1 车长独立周视镜,右后) */
+        cupola: { radius: 0.22, height: 0.24, x: 0.35, y: 0.78, z: -0.25 },
+        /** 车长瞄准镜(前部柱状,独立周视镜) */
+        sight: { halfX: 0.13, halfY: 0.2, halfZ: 0.13, x: 0.32, y: 0.82, z: 0.28 },
+        /** 装填手舱盖(左侧不对称,M1 标志) */
+        loaderHatch: { radius: 0.22, height: 0.12, x: -0.35, y: 0.78, z: 0.0 },
+        /** 炮塔尾部储物篮(后部楔尾处,扁平篮筐) */
+        bustle: { halfX: 0.68, halfY: 0.28, halfZ: 0.4, x: 0, y: 0.42, z: -1.1 },
+        /** 无独立前脸防盾块(楔形炮塔本身够锐) */
+        frontShield: undefined,
+        /** 车长机枪站(M1 炮塔顶 12.7mm 机枪:底座+枪管,装填手位) */
+        mgStation: {
+          baseHalf: { x: 0.16, y: 0.1, z: 0.18 },
+          base: { x: -0.35, y: 0.95, z: -0.1 },
+          barrelRadius: 0.025, barrelLen: 0.7,
+          barrel: { x: -0.35, y: 1.1, z: 0.15 },
+        },
+      },
+      barrel: { offset: { x: 0, y: 0.3, z: 0.55 }, length: 2.9, radius: 0.1 }, // M256 120mm,热护套粗
+      /** 无炮口制退器(M256 用热护套不用制退器) */
+      muzzleBrake: undefined,
+      /** 热护套(炮管中段分段加粗,防热变形,现代坦克标志) */
+      thermalSleeve: { radius: 0.14, length: 1.6, posRatio: 0.45 },
+      /** 炮盾(炮管根部加厚防盾) */
+      mantlet: { radius: 0.2, halfZ: 0.4 },
+      colors: {
+        hull: 0xb5a06a, turret: 0xb5a06a,
+        camo: { base: 0xb5a06a, blobDark: 0x8a7445, blobMid: 0xd4c089 }, // 沙漠黄三色
+        trackMetal: 0x333333, wheelRubber: 0x1a1a1a, wheelHub: 0x555555,
+        barrel: 0x8a7445, detail: 0x3a3520, fender: 0xa08a55,
+      },
+      number: 'A11',
+      /** 贴花:战术编号(无十字,美军风格) */
+      decal: { cross: false, crossColor: 0x1a1a1a },
+      maxHp: 160, // 贫铀复合装甲→抗揍但略低于虎式(体型小些)
+    },
   },
 
   /** 山(四周背景，静态不可破坏，环形围合村庄) */

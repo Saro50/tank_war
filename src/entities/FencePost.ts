@@ -84,7 +84,31 @@ export class FencePost {
     this.state = 'knocked';
   }
 
-  /** 被坦克/物体撞击 → 转 dynamic + 随机水平方向翻倒 */
+  /** 被爆炸波及：fixed 转 dynamic + 沿爆心水平方向推倒 + 上抬 + 扭矩 */
+  takeHit(epicenter: { x: number; y: number; z: number }): void {
+    if (this.state !== 'intact') return;
+    const cfg = CONFIG.destruction.fence;
+    const t = this.body.translation();
+    const dx = t.x - epicenter.x;
+    const dz = t.z - epicenter.z;
+    const d = Math.hypot(dx, dz);
+    if (d >= cfg.hitRadius) return;
+
+    this.state = 'knocked';
+    this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    const dl = d || 1;
+    this.body.applyImpulse(
+      { x: (dx / dl) * cfg.knockImpulse, y: 1.5, z: (dz / dl) * cfg.knockImpulse },
+      true,
+    );
+    this.body.applyTorqueImpulse(
+      { x: (Math.random() - 0.5) * 3, y: 0, z: (Math.random() - 0.5) * 3 },
+      true,
+    );
+    log.info('fence hit', { x: t.x.toFixed(1), z: t.z.toFixed(1) });
+  }
+
+  /** 被坦克/物体撞击(无方向信息) → 转 dynamic + 随机水平方向翻倒 */
   knockDown(): void {
     if (this.state !== 'intact') return;
     this.state = 'knocked';
