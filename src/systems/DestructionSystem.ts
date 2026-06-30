@@ -9,6 +9,7 @@ import { Tower } from '../entities/Tower';
 import { Tree } from '../entities/Tree';
 import { FencePost } from '../entities/FencePost';
 import { StaticTank } from '../entities/StaticTank';
+import type { Tank } from '../entities/Tank';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Destruction');
@@ -93,9 +94,10 @@ export class DestructionSystem {
   /** 房屋(结构 HP + 屋顶瓦块，HP 归零屋顶塌落) */
   private houses: House[] = [];
   private fragments: Fragment[] = [];
-  /** 坦克 collider handle(识别坦克参与碰撞) + 刚体(读速度算撞击伤害) */
+  /** 玩家坦克:撞击判定(读 handle/刚体速度) + 受击目标(takeHit) + update 推进冒烟。 */
   private tankCollider = -1;
   private tankBody?: RAPIER.RigidBody;
+  private playerTank?: Tank;
   /** 撞击冷却(秒)：连续碰撞不重复扣血，避免一帧多次 applyDamage */
   private ramCooldown = 0;
 
@@ -105,10 +107,37 @@ export class DestructionSystem {
     log.info('destruction system ready');
   }
 
-  /** 注册坦克 collider handle(撞击破坏判定用)。由 main 创建坦克后调用。 */
-  setTankCollider(handle: number): void {
-    this.tankCollider = handle;
-    this.tankBody = this.physics.world.getCollider(handle).parent() ?? undefined;
+  /**
+   * 注册玩家坦克(撞击破坏判定 + 自身受击目标)。由 main 创建坦克后调用。
+   * 同时记录 collider handle(撞别人判定)、刚体(读速度算撞击力)、坦克实例(被击+update)。
+   */
+  setPlayerTank(tank: Tank): void {
+    this.tankCollider = tank.colliderHandle;
+    this.tankBody = tank.body;
+    this.playerTank = tank;
+  }
+
+  /**
+   * 调试用:对最近的一辆完好静态坦克施加一次满伤受击(验证损坏链,无 AI 攻击者时用)。
+   * 爆心设在目标刚体前方 0.8m(车身内) → falloff 接近满伤,命中约 hitDamage 伤害。
+   */
+  simulateStaticHit(): void {
+    if (!this.playerTank) return;
+    const playerPos = this.playerTank.body.translation();
+    let nearest: StaticTank | undefined;
+    let nearestD2 = Infinity;
+    for (const st of this.staticTanks) {
+      if (st.state !== 'intact') continue;
+      const t = st.body.translation();
+      const d2 = (t.x - playerPos.x) ** 2 + (t.z - playerPos.z) ** 2;
+      if (d2 < nearestD2) {
+        nearestD2 = d2;
+        nearest = st;
+      }
+    }
+    if (!nearest) return;
+    const t = nearest.body.translation();
+    this.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
   }
 
   /** 创建可破坏物：箱子(hp=1)或塔楼(hp=100)，统一机制 */
@@ -395,9 +424,12 @@ export class DestructionSystem {
     this.bricks.push({ body, mesh });
   }
 
-  /** 炮击爆炸：以爆心为中心、爆炸半径内施加破坏(复用统一 applyDamage) */
-  onExplosion(pos: { x: number; y: number; z: number }, radius: number): void {
-    this.applyDamage(pos, radius, CONFIG.destruction.hitDamage);
+  /**
+   * 炮击爆炸：以爆心为中心、爆炸半径内施加破坏(复用统一 applyDamage)。
+   * @param excludePlayer 玩家自己的炮弹爆炸时传 true,跳过对玩家自身的伤害(防开火自伤)。
+   */
+  onExplosion(pos: { x: number; y: number; z: number }, radius: number, excludePlayer = false): void {
+    this.applyDamage(pos, radius, CONFIG.destruction.hitDamage, excludePlayer);
   }
 
   /**
@@ -405,13 +437,15 @@ export class DestructionSystem {
    * ------------------------------------------------------------
    * 以 pos 为中心、radius 为影响半径，对范围内所有可破坏物施加伤害：
    *  - 箱子/塔楼/树：HP 机制，按距离衰减扣血(各自内部再按自有 hitRadius 过滤)
+   *  - 玩家坦克/静态坦克：HP 机制，距离衰减扣血，hp<=0 被击毁
    *  - 砖块：径向衰减冲量飞溅
    *  - 屋顶瓦块/山墙：半径内活化掉落
    *  - 房屋结构：扣结构 HP，归零则整栋屋顶塌落
    * 炮击调用 damage=hitDamage；撞击调用 damage=按坦克速度缩放(由 handleCollision 算好)。
    * 这样炮击与撞击对每个可破坏物完全一致。
+   * @param excludePlayer 玩家自身炮弹爆炸传 true,跳过对玩家伤害(防自伤)。
    */
-  applyDamage(pos: { x: number; y: number; z: number }, radius: number, damage: number): void {
+  applyDamage(pos: { x: number; y: number; z: number }, radius: number, damage: number, excludePlayer = false): void {
     const r2 = radius * radius;
 
     // 箱子(HP 机制：伤害按距离衰减，hp<=0 才倒塌)
@@ -443,8 +477,27 @@ export class DestructionSystem {
       if (d2 >= r2) continue;
       const dist = Math.sqrt(d2);
       const falloff = 1 - dist / radius;
-      st.takeHit(pos, damage * falloff);
+      const frags = st.takeHit(pos, damage * falloff);
+      this.fragments.push(...frags);
       tanksHit++;
+    }
+
+    // 玩家坦克(HP 机制：距离衰减扣血,hp<=0 被击毁)。
+    // excludePlayer=true 时跳过(玩家自身炮弹爆炸,防开火自伤);
+    // 撞击(handleCollision)爆心在被撞物位置,玩家是撞击方不会被自己撞,不传 exclude,正常判定。
+    let playerHit = 0;
+    if (this.playerTank && !excludePlayer && this.playerTank.state === 'intact') {
+      const t = this.playerTank.body.translation();
+      const dx = t.x - pos.x,
+        dy = t.y - pos.y,
+        dz = t.z - pos.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < r2) {
+        const dist = Math.sqrt(d2);
+        const falloff = 1 - dist / radius;
+        this.playerTank.takeHit(pos, damage * falloff);
+        playerHit++;
+      }
     }
 
     // 砖块(距离衰减冲量 + 上扰 + 随机扭矩)
@@ -550,8 +603,8 @@ export class DestructionSystem {
       }
     }
 
-    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || fencesHit > 0 || tanksHit > 0 || roofHit > 0 || roofsCollapsed > 0) {
-      log.info('damage', { destroyed, bricksHit, towersHit, treesHit, fencesHit, tanksHit, roofHit, roofsCollapsed, radius, damage: damage.toFixed(1) });
+    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || fencesHit > 0 || tanksHit > 0 || playerHit > 0 || roofHit > 0 || roofsCollapsed > 0) {
+      log.info('damage', { destroyed, bricksHit, towersHit, treesHit, fencesHit, tanksHit, playerHit, roofHit, roofsCollapsed, radius, damage: damage.toFixed(1) });
     }
   }
 
@@ -593,7 +646,7 @@ export class DestructionSystem {
     this.applyDamage({ x: t.x, y: t.y, z: t.z }, radius, damage);
   }
 
-  /** 每帧更新碎片寿命/淡出(砖块由物理同步，不需更新) + 撞击冷却 */
+  /** 每帧更新碎片寿命/淡出(砖块由物理同步，不需更新) + 撞击冷却 + 静态坦克冒烟 */
   update(dt: number): void {
     if (this.ramCooldown > 0) this.ramCooldown -= dt;
     this.fragments = this.fragments.filter((f) => {
@@ -601,6 +654,9 @@ export class DestructionSystem {
       f.dispose(this.physics, this.render);
       return false;
     });
+    for (const st of this.staticTanks) st.update(dt);
+    // 玩家坦克冒烟/击毁爆炸推进
+    if (this.playerTank) this.playerTank.update(dt);
   }
 
   /** 诊断 */

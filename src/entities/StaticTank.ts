@@ -8,19 +8,26 @@ import {
   Mesh,
   MeshStandardMaterial,
   PlaneGeometry,
+  Quaternion,
   RepeatWrapping,
   Texture,
+  Vector3,
 } from 'three';
 import { PhysicsWorld } from '../core/PhysicsWorld';
 import { RenderScene } from '../core/RenderScene';
 import { SyncBridge } from '../core/SyncBridge';
 import {
   makeCamouflageCanvas,
+  makeGlacisGeometry,
   makeNumberDecalCanvas,
   makeTrackTexture,
   makeWedgeGeometry,
   makeWedgeTurretGeometry,
 } from './Tank';
+import { Fragment } from './Destructible';
+import type { Damageable } from './Damageable';
+import { Smoke } from '../effects/Smoke';
+import { Explosion } from '../effects/Explosion';
 import { CONFIG } from '../config';
 import { Logger } from '../utils/Logger';
 
@@ -35,6 +42,8 @@ type StaticTankConfig = {
     bottomHalfX: number; topHalfX: number; bottomHalfZ: number; topHalfZ: number; height: number; centerY: number;
     /** 车首驾驶舱凸起(M1 标志性前上装甲板上的驾驶舱) */
     frontHatch?: Maybe<{ halfX: number; halfY: number; halfZ: number; x: number; y: number; z: number }>;
+    /** 车首下斜板(lower glacis:三角楔,后缘贴车体前端、斜面从前顶下倾到前底) */
+    frontSlope?: Maybe<{ halfX: number; halfDepth: number; halfHeight: number; x: number; y: number; z: number }>;
   };
   track: { halfX: number; halfY: number; halfZ: number; offsetX: number; centerY: number; texRepeat: number };
   roadWheel: { count: number; radius: number; halfWidth: number; offsetX: number; centerY: number; zSpan: number };
@@ -106,18 +115,32 @@ function makeCrossDecalCanvas(size = 128): HTMLCanvasElement {
  * 物理:fixed 刚体(静态障碍);接入 DestructionSystem.applyDamage。
  * 破坏:HP 机制,HP≤0 时整辆转 dynamic + 爆心方向冲量 → 被炸翻。
  */
-export class StaticTank {
+export class StaticTank implements Damageable {
   readonly body: RAPIER.RigidBody;
   readonly colliderHandle: number;
   readonly group: Group;
   state: 'intact' | 'destroyed' = 'intact';
   private hp: number;
+  private readonly startHp: number;
   /** 独有 GPU 资源(dispose 用) */
   private readonly geos: BufferGeometry[] = [];
   private readonly mats: MeshStandardMaterial[] = [];
   private readonly texs: (CanvasTexture | Texture)[] = [];
   /** 材质池(按名索引,供 buildTracks 等方法复用) */
   private mat!: Record<string, MeshStandardMaterial>;
+  /** 击毁时的大爆炸特效(自行维护寿命,update 推进) */
+  private readonly explosions: Explosion[] = [];
+  /** 坦克型号(击毁时取炮塔尺寸做炸飞碰撞体用) */
+  private readonly variant: 'tiger' | 'abrams';
+  /** 击毁时炸飞脱离车身的炮塔独立刚体(dispose 清理) */
+  private turretBody?: RAPIER.RigidBody;
+  /** 受伤冒烟源(HP 低于阈值时激活,挂在炮塔顶) */
+  private smoke?: Smoke;
+  /** 炮塔引用(冒烟挂载点) */
+  private turret!: Group;
+  /** 物理/渲染入口(dispose 碎片/冒烟用) */
+  private physics!: PhysicsWorld;
+  private render!: RenderScene;
 
   constructor(
     physics: PhysicsWorld,
@@ -128,8 +151,12 @@ export class StaticTank {
     /** 'tiger' | 'abrams' */
     variant: 'tiger' | 'abrams',
   ) {
+    this.variant = variant;
     const cfg: StaticTankConfig = CONFIG.staticTank[variant];
     this.hp = cfg.maxHp;
+    this.startHp = cfg.maxHp;
+    this.physics = physics;
+    this.render = render;
     const c = cfg.colors;
 
     // —— 物理车身(fixed 静态障碍) ——
@@ -138,8 +165,16 @@ export class StaticTank {
       .setTranslation(spawn.x, spawn.y, spawn.z)
       .setRotation({ x: 0, y: yaw, z: 0, w: 1 });
     this.body = physics.world.createRigidBody(bodyDesc);
+    // 碰撞体设置要点(修复击毁后悬空静止 BUG):
+    // 1) setDensity:转 dynamic 时质量从碰撞体密度重算,无密度 → 质量 0 →
+    //    inverse mass=0 → 冲量与重力全失效,表现为悬空静止。设密度保证质量>0。
+    // 2) setTranslation(0, height, 0):碰撞体半高=height,中心上移 height 后
+    //    底部恰好对齐 body 原点(=地面 y=0)。否则半高以下穿入地下,转 dynamic
+    //    时被 Rapier 穿透恢复求解器弹飞/卡死。质心随之升高,也利于被炸翻。
     const col = physics.world.createCollider(
       RAPIER.ColliderDesc.cuboid(hh.topHalfX + cfg.track.halfX, hh.height, hh.bottomHalfZ)
+        .setTranslation(0, hh.height, 0)
+        .setDensity(2)
         .setFriction(0.8)
         .setRestitution(0.0)
         .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS),
@@ -199,11 +234,26 @@ export class StaticTank {
       this.group.add(fmesh);
     }
 
+    // 车首下斜板(lower glacis:三角楔)。
+    // 后竖直面贴车体前端、顶面接车体顶、斜面从前顶下倾到前底,
+    // 与车体连成整体形成"梯形往下"的车头,无悬空空隙。
+    if (cfg.hull.frontSlope) {
+      const fs = cfg.hull.frontSlope;
+      const fgeo = makeGlacisGeometry(fs.halfX, fs.halfDepth, fs.halfHeight);
+      this.geos.push(fgeo);
+      const fmesh = new Mesh(fgeo, mat.hull);
+      fmesh.position.set(fs.x, fs.y, fs.z);
+      fmesh.castShadow = true;
+      fmesh.receiveShadow = true;
+      this.group.add(fmesh);
+    }
+
     // ===== 履带 + 主动轮 + 负重轮 + 挡泥板(两侧) =====
     this.buildTracks(cfg, c);
 
     // ===== 炮塔 =====
-    const turret = new Group();
+    this.turret = new Group();
+    const turret = this.turret;
     turret.position.set(cfg.turret.offset.x, cfg.turret.offset.y, cfg.turret.offset.z);
     const tb = cfg.turret.body;
     // 炮塔主体:提供 frontHalfZ/backHalfZ → 前后非对称楔形(正面厚后部薄);否则对称楔形
@@ -465,11 +515,15 @@ export class StaticTank {
       track.receiveShadow = true;
       this.group.add(track);
 
-      // 上回程段(闭环履带的上半圈,扁平薄段,绕过端轮)
-      const returnTrack = new Mesh(returnGeo, trackMat);
-      returnTrack.position.set(side * tr.offsetX, tr.centerY + tr.halfY * 1.4, 0);
-      returnTrack.castShadow = true;
-      this.group.add(returnTrack);
+      // 上回程段(闭环履带的上半圈,扁平薄段,绕过端轮)。
+      // 仅现代坦克(有托带轮 returnRoller)渲染——二战坦克(虎式)履带被护板遮住、
+      // 无暴露回程段,渲染它会悬空漂浮成 BUG 状造型。
+      if (cfg.returnRoller) {
+        const returnTrack = new Mesh(returnGeo, trackMat);
+        returnTrack.position.set(side * tr.offsetX, tr.centerY + tr.halfY * 1.4, 0);
+        returnTrack.castShadow = true;
+        this.group.add(returnTrack);
+      }
 
       // 前后端轮:前端主动轮(带齿)、后端诱导轮(实心盘),无差异化配置则前后同型实心
       for (const z of [-tr.halfZ + tr.halfY, tr.halfZ - tr.halfY]) {
@@ -546,32 +600,216 @@ export class StaticTank {
     }
   }
 
-  /** 受击(由 DestructionSystem.applyDamage 调用,与炮击/撞击统一) */
-  takeHit(epicenter: { x: number; y: number; z: number }, damage: number): void {
-    if (this.state !== 'intact') return;
+  /**
+   * 受击(由 DestructionSystem.applyDamage 调用,与炮击/撞击统一)。
+   * 反馈:① 冒烟(HP 低于阈值,越接近击毁越浓) ② 击毁→大爆炸+浓烟+烧焦+碎片飞溅翻倒。
+   * 命中瞬间反馈由炮弹爆炸火球(WeaponSystem.detonate)承担,车身不再出黑色弹坑(视觉不佳)。
+   * @returns 击毁时返回飞溅碎片(由 DestructionSystem 维护寿命);未击毁返回空数组。
+   */
+  takeHit(epicenter: { x: number; y: number; z: number }, damage: number): Fragment[] {
+    if (this.state !== 'intact') return [];
     this.hp -= damage;
+    // 冒烟(HP 低于阈值 → 激活,越接近击毁越浓)
+    const cfg = CONFIG.staticTank;
+    const ratio = this.hp / this.startHp;
+    if (ratio <= cfg.smokeThreshold) {
+      this.ensureSmoke();
+      // 强度:刚过阈值→0.3,临近击毁→1
+      const intensity = 0.3 + 0.7 * (1 - ratio / cfg.smokeThreshold);
+      this.smoke!.setIntensity(intensity);
+    }
     log.debug('static tank hit', { hp: this.hp.toFixed(1), damage: damage.toFixed(1) });
-    if (this.hp <= 0) this.destroy(epicenter);
+    if (this.hp <= 0) return this.destroy(epicenter);
+    return [];
   }
 
-  /** 击毁:fixed→dynamic,沿爆心方向爆炸冲量把坦克掀翻 */
-  private destroy(epicenter: { x: number; y: number; z: number }): void {
+  /** 懒创建冒烟源(挂车身中上部;击毁炮塔炸飞后烟仍从车身残骸冒) */
+  private ensureSmoke(): void {
+    if (this.smoke) return;
+    this.smoke = new Smoke(new Vector3(0, 1.0, 0)); // 车身中上部
+    this.group.add(this.smoke.group);
+  }
+
+  /**
+   * 击毁:① 烧焦变黑 ② fixed→dynamic 翻倒 ③ 大爆炸 ④ 炮塔炸飞 ⑤ 碎片飞溅 ⑥ 升级浓烟。
+   * 时序:烧焦+爆炸+炮塔飞离+碎片+浓烟几乎同时触发,浓烟挡住视线,烟散后露出
+   *      焦黑翻倒的车身 + 被掀飞在一旁的炮塔 + 散落碎片(严重损坏视觉)。
+   * 返回飞溅碎片供 DestructionSystem 维护寿命。
+   */
+  private destroy(epicenter: { x: number; y: number; z: number }): Fragment[] {
     this.state = 'destroyed';
+    const cfg = CONFIG.staticTank;
+    // ① 烧焦变黑(立即):去除迷彩/贴花纹理、压暗哑光。随后浓烟遮挡,烟散后显露焦黑车体。
+    this.scorch();
+    // ② fixed→dynamic + 爆心方向冲量翻倒。顺序至关重要(修复击毁后悬空静止 BUG):
+    //    必须先 setBodyType(Dynamic)——此时从碰撞体密度重算质量(碰撞体已设密度 → 质量>0);
+    //    再 setAdditionalMass 微调。若反过来,fixed 阶段 setAdditionalMass 注册不可靠,
+    //    且 setBodyType 会从碰撞体重算质量覆盖附加质量 → 质量 0 → 冲量/重力失效 → 悬空静止。
     this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    this.body.setAdditionalMass(cfg.destroyedMass, true);
     const t = this.body.translation();
     const dx = t.x - epicenter.x;
     const dz = t.z - epicenter.z;
     const d = Math.hypot(dx, dz) || 1;
-    const imp = CONFIG.staticTank.destroyImpulse;
+    const imp = cfg.destroyImpulse;
     this.body.applyImpulse(
       { x: (dx / d) * imp, y: imp * 0.8, z: (dz / d) * imp },
       true,
     );
+    // 扭矩冲量随机范围已放大 3.4 倍(8→27 / 4→14),补偿碰撞体设密度后总质量增大(~103kg)
+    // 导致的角速度衰减,保证仍能被炸翻滚。
     this.body.applyTorqueImpulse(
-      { x: (Math.random() - 0.5) * 8, y: (Math.random() - 0.5) * 4, z: (Math.random() - 0.5) * 8 },
+      { x: (Math.random() - 0.5) * 27, y: (Math.random() - 0.5) * 14, z: (Math.random() - 0.5) * 27 },
       true,
     );
-    log.info('static tank DESTROYED', { at: t });
+    // ③ 大爆炸:于车身位置生成放大爆炸(scale>1,粒子更多更大更久),视觉上"较大爆炸"。
+    this.explosions.push(new Explosion(this.render, t, cfg.destroyExplosionScale));
+    // ④ 炮塔炸飞:把炮塔分离为独立 dynamic 刚体并施加冲量,营造"炮塔被掀飞"的严重损坏。
+    this.blowTurret(epicenter);
+    // ⑤ 碎片飞溅(复用 Fragment:从车身外表面生成若干碎块刚体,向外向上炸开)
+    const fragments = this.spawnFragments(t);
+    // ⑥ 升级浓烟:挂车身残骸(炮塔已炸飞),持续冒浓烟挡住视线,烟散后露出焦黑车体。
+    if (this.smoke) this.smoke.dispose();
+    this.smoke = new Smoke(new Vector3(0, 1.0, 0), cfg.destroySmokeScale);
+    this.group.add(this.smoke.group);
+    this.smoke.setIntensity(1);
+    log.info('static tank DESTROYED', { at: t, fragments: fragments.length });
+    return fragments;
+  }
+
+  /**
+   * 烧焦变黑:把车身所有材质变为焦黑破损外观(去迷彩/贴花纹理、压暗、哑光)。
+   * 击毁时调用;遍历 this.mats 覆盖车体/炮塔/履带/轮/炮管/贴花/碎片全部材质。
+   */
+  private scorch(): void {
+    for (const m of this.mats) {
+      m.map = null;              // 去除迷彩/履带/贴花纹理,露出焦黑底色
+      m.color.setHex(0x141414);  // 焦黑
+      m.roughness = 0.98;
+      m.metalness = 0.15;
+      m.transparent = false;     // 贴花材质原本半透明,烧焦后实心
+      m.alphaTest = 0;
+      m.needsUpdate = true;
+    }
+  }
+
+  /**
+   * 炮塔炸飞:把炮塔从车身分离为独立 dynamic 刚体,施加爆炸冲量使其飞离/翻滚。
+   * ------------------------------------------------------------
+   * 营造"炮塔被掀飞"的严重损坏视觉(区别于车身整体翻倒)。
+   *  - 取炮塔当前世界位姿(击毁瞬间车身尚未动,矩阵为 intact 状态)
+   *  - 从车身 group 分离炮塔改挂场景,绑定新建 dynamic 刚体(box 碰撞体近似炮塔)
+   *  - 冲量:强上抛(掀飞)+ 远离爆心 + 随机扭矩(翻滚)
+   * 炮塔刚体由 this.turretBody 持有,dispose 时清理。
+   */
+  private blowTurret(epicenter: { x: number; y: number; z: number }): void {
+    if (!this.turret) return;
+    // as StaticTankConfig:CONFIG.staticTank[variant] 是 tiger|abrams 联合字面量,
+    // 直接索引推断会退化为 never;用类型断言统一到 StaticTankConfig(frontHalfZ/backHalfZ 为 optional)。
+    const tcfg = (CONFIG.staticTank[this.variant] as StaticTankConfig).turret.body;
+    // 炮塔世界位姿(击毁瞬间车身尚未动,矩阵为 intact 状态)
+    const wpos = new Vector3();
+    const wquat = new Quaternion();
+    this.turret.getWorldPosition(wpos);
+    this.turret.getWorldQuaternion(wquat);
+    // 从车身 group 分离炮塔,改挂场景(独立运动,不再随车身)。
+    // 挂场景后局部坐标=世界坐标(scene 在原点),立即对齐到炮塔世界位姿,避免分离瞬间错位闪烁。
+    this.group.remove(this.turret);
+    this.render.scene.add(this.turret);
+    this.turret.position.copy(wpos);
+    this.turret.quaternion.copy(wquat);
+    // 创建独立 dynamic 刚体 + box 碰撞体(近似炮塔尺寸)
+    const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(wpos.x, wpos.y, wpos.z)
+      .setRotation({ x: wquat.x, y: wquat.y, z: wquat.z, w: wquat.w })
+      .setLinearDamping(0.2)
+      .setAngularDamping(0.25);
+    this.turretBody = this.physics.world.createRigidBody(bodyDesc);
+    const halfZ = Math.max(tcfg.frontHalfZ ?? tcfg.bottomHalfZ, tcfg.backHalfZ ?? tcfg.bottomHalfZ);
+    this.physics.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(tcfg.bottomHalfX, tcfg.height / 2, halfZ)
+        .setDensity(1.5)
+        .setFriction(0.6)
+        .setRestitution(0.2),
+      this.turretBody,
+    );
+    SyncBridge.bind(this.turretBody, this.turret);
+    // 冲量用绝对值校准(炮塔刚体质量小~3kg,若按 destroyImpulse 比例会飞太高):
+    // 上抛 Δv~6-9m/s(被掀起)、水平远离爆心、翻滚扭矩明显但不失控。
+    const dx = wpos.x - epicenter.x;
+    const dz = wpos.z - epicenter.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const lift = 18 + Math.random() * 8;
+    const horiz = 10 + Math.random() * 6;
+    this.turretBody.applyImpulse(
+      { x: (dx / d) * horiz, y: lift, z: (dz / d) * horiz },
+      true,
+    );
+    this.turretBody.applyTorqueImpulse(
+      { x: (Math.random() - 0.5) * 15, y: (Math.random() - 0.5) * 8, z: (Math.random() - 0.5) * 15 },
+      true,
+    );
+    log.info('turret blown off', { at: wpos });
+  }
+
+  /** 击毁时生成碎片飞溅(复用 Fragment 类) */
+  private spawnFragments(center: { x: number; y: number; z: number }): Fragment[] {
+    const fragments: Fragment[] = [];
+    const n = CONFIG.staticTank.fragmentCount;
+    for (let i = 0; i < n; i++) {
+      // 碎块尺寸随机
+      const hx = 0.15 + Math.random() * 0.2;
+      const hy = 0.12 + Math.random() * 0.15;
+      const hz = 0.15 + Math.random() * 0.2;
+      // 生成位置:车身四周外表面(水平半径>碰撞体半径,避免生成在碰撞体内部被物理挤出→底部小方块BUG);
+      // 高度在车身范围(远离地面),碎片从外表面向外向上炸开。
+      const angle = Math.random() * Math.PI * 2;
+      const rad = 1.7 + Math.random() * 0.4; // > 碰撞体水平半径(~1.46),确保在表面之外
+      const fx = center.x + Math.cos(angle) * rad;
+      const fz = center.z + Math.sin(angle) * rad;
+      const fy = 0.6 + Math.random() * 1.6; // 车身高度范围,远离地面
+      const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(fx, fy, fz)
+        .setLinearDamping(0.1)
+        .setAngularDamping(0.2);
+      const fbody = this.physics.world.createRigidBody(bodyDesc);
+      this.physics.world.createCollider(
+        RAPIER.ColliderDesc.cuboid(hx, hy, hz).setDensity(6).setFriction(0.7).setRestitution(0.2),
+        fbody,
+      );
+      const geo = new BoxGeometry(hx * 2, hy * 2, hz * 2);
+      this.geos.push(geo);
+      const mat = new MeshStandardMaterial({ color: 0x3a3a30, roughness: 0.95, metalness: 0.1, transparent: true });
+      this.mats.push(mat);
+      const fmesh = new Mesh(geo, mat);
+      fmesh.castShadow = true;
+      this.render.scene.add(fmesh);
+      SyncBridge.bind(fbody, fmesh);
+      // 碎片质量小(~0.1kg,density6),冲量用小值校准:Δv~7-10m/s,从车身炸开散落后落地
+      const burst = 0.9 + Math.random() * 0.6;
+      fbody.applyImpulse(
+        { x: Math.cos(angle) * burst, y: 1.2 + Math.random() * 0.8, z: Math.sin(angle) * burst },
+        true,
+      );
+      fbody.applyTorqueImpulse(
+        { x: (Math.random() - 0.5) * 5, y: (Math.random() - 0.5) * 5, z: (Math.random() - 0.5) * 5 },
+        true,
+      );
+      fragments.push(new Fragment(fbody, fmesh, geo, mat));
+    }
+    return fragments;
+  }
+
+  /** 每帧更新:驱动冒烟 + 推进击毁大爆炸粒子(寿命到回收)。由 DestructionSystem.update 调用。 */
+  update(dt: number): void {
+    if (this.smoke) this.smoke.update(dt);
+    // 倒序遍历便于 splice 回收到期的爆炸特效
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const e = this.explosions[i];
+      if (e.update(dt)) continue;
+      e.dispose(this.render);
+      this.explosions.splice(i, 1);
+    }
   }
 
   /** 彻底销毁(场景重置用) */
@@ -579,6 +817,19 @@ export class StaticTank {
     SyncBridge.unbind(this.body);
     physics.world.removeRigidBody(this.body);
     render.scene.remove(this.group);
+    // 若炮塔已被炸飞为独立刚体(挂场景),清理其刚体+场景节点
+    if (this.turretBody) {
+      SyncBridge.unbind(this.turretBody);
+      physics.world.removeRigidBody(this.turretBody);
+      this.turretBody = undefined;
+      render.scene.remove(this.turret);
+    }
+    for (const e of this.explosions) e.dispose(render);
+    this.explosions.length = 0;
+    if (this.smoke) {
+      this.smoke.dispose();
+      this.smoke = undefined;
+    }
     for (const t of this.texs) t.dispose();
     for (const m of this.mats) m.dispose();
     for (const g of this.geos) g.dispose();

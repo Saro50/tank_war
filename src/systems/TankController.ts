@@ -57,8 +57,9 @@ export class TankController {
     });
   }
 
-  /** step 前调用：方向键控制车身移动/转向（坦克式） */
+  /** step 前调用：方向键控制车身移动/转向（坦克式）。被击毁后停止响应输入。 */
   applyDrive(input: InputState): void {
+    if (this.tank.state !== 'intact') return; // 被击毁:停止驾驶
     const cfg = CONFIG.tank;
     const reverseMul = input.forward < 0 ? cfg.reverseScale : 1;
     const targetLin = input.forward * cfg.moveSpeed * reverseMul;
@@ -79,9 +80,21 @@ export class TankController {
     this.tank.body.setAngvel({ x: 0, y: this.curTurn, z: 0 }, true);
   }
 
-  /** step 后、sync 后调用：炮塔/炮管键盘积分 + 履带 + 相机 */
+  /**
+   * step 后、sync 后调用：炮塔/炮管键盘积分 + 履带 + 相机。
+   * 被击毁后炮塔/炮管/履带/扬尘停转,仅保留相机跟随(看被毁残骸)。
+   */
   aimAndCamera(input: InputState, dt: number): void {
     const cfg = CONFIG.tank;
+
+    // 被击毁:跳过操控相关更新,仅回收残留扬尘淡出 + 相机继续跟随残骸
+    if (this.tank.state !== 'intact') {
+      this.curLin = 0;
+      this.curTurn = 0;
+      this.updateDust(dt);
+      this.updateCamera();
+      return;
+    }
 
     // 炮塔水平旋转（Q/W）：角速度 lerp 实现惯性
     // 按键角速度渐增到 turnSpeed，松键渐衰减 → 加速感 + 滑转感

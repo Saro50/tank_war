@@ -30,16 +30,19 @@ export class Explosion {
   constructor(
     render: RenderScene,
     pos: { x: number; y: number; z: number },
+    /** 尺寸缩放(1=普通炮弹爆炸;>1=放大,如坦克击毁大爆炸用 2.5)。放大粒子数/大小/寿命 */
+    scale = 1,
   ) {
     const cfg = CONFIG.weapon.explosion;
-    this.maxLife = cfg.lifetime;
-    this.baseRadius = cfg.particleRadius;
+    this.maxLife = cfg.lifetime * scale;
+    this.baseRadius = cfg.particleRadius * scale;
 
     this.group = new Group();
     this.group.position.set(pos.x, pos.y, pos.z);
 
     const tmpColor = new Color();
-    for (let i = 0; i < cfg.particleCount; i++) {
+    const count = Math.round(cfg.particleCount * scale);
+    for (let i = 0; i < count; i++) {
       // 球面均匀随机方向
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);

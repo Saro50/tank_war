@@ -27,8 +27,28 @@ async function main(): Promise<void> {
   const container = document.getElementById('app');
   if (!container) throw new Error('mount container #app not found');
 
-  // 调参面板(最早创建：restore 先覆盖 CONFIG 默认值，之后所有模块读到调参后的值)
-  new TuningPanel();
+  // destruction/tank 在下方创建,但调试回调需引用它们;
+  // 用 let 占位 + 闭包捕获,按钮点击时(模块均已建好)才读取。
+  let destructionRef: DestructionSystem | undefined;
+  let tankRef: Tank | undefined;
+
+  // 调参面板(最早创建：restore 先覆盖 CONFIG 默认值，之后所有模块读到调参后的值)。
+  // 调试回调注入:点击"模拟受击"按钮 → 在目标附近生成满伤爆心,验证损坏链(无需 AI 攻击者)。
+  new TuningPanel({
+    simulatePlayerHit: (): void => {
+      const d = destructionRef, tank = tankRef;
+      if (!d || !tank) return;
+      // 爆心设在玩家刚体前方 0.8m(车身内,排除自伤距离 < 玩家尺寸) → falloff 接近满伤。
+      // applyDamage 对玩家自身开火有 excludePlayer 保护,此为外部模拟,正常判定。
+      const t = tank.body.translation();
+      d.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
+    },
+    simulateStaticHit: (): void => {
+      const d = destructionRef;
+      if (!d) return;
+      d.simulateStaticHit();
+    },
+  });
 
   const physics = await PhysicsWorld.create();
   const render = new RenderScene(container);
@@ -38,12 +58,14 @@ async function main(): Promise<void> {
 
   // 村庄情景(在坦克之前创建，便于坦克出生在前方空地)
   const destruction = new DestructionSystem(physics, render);
+  destructionRef = destruction;
   buildVillage(destruction);
   buildStaticTanks(physics, render, destruction);
 
   const bh = CONFIG.tank.bodyHalf;
   const tank = new Tank(physics, render, { x: 0, y: bh.y + 0.1, z: -8 });
-  destruction.setTankCollider(tank.colliderHandle);
+  tankRef = tank;
+  destruction.setPlayerTank(tank);
 
   const input = new InputSystem();
   input.attach();

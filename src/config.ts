@@ -216,7 +216,7 @@ export const CONFIG = {
         blobMid: 0x38401e, // 暗绿斑块
       },
       /** 炮塔战术编号贴花文字 */
-      number: '01',
+      number: '03',
       trackMetal: 0x2a2d33, // 履带深铁灰(金属)
       wheelRubber: 0x1a1c1f, // 负重轮橡胶黑(全哑光)
       wheelHub: 0x3a3d42, // 轮毂金属中灰
@@ -224,6 +224,19 @@ export const CONFIG = {
       mantlet: 0x2e3137, // 炮盾深灰铸铁
       detail: 0x141619, // 天线/格栅等黑色细节
       fender: 0x4a5424, // 挡泥板(同车身略暗，区分层次)
+    },
+
+    /** 损坏系统(玩家坦克被击:HP 机制,与静态坦克同名参数语义一致,便于未来统一) */
+    damage: {
+      /** 最大血量:玩家 T-14 装甲厚,maxHp=60 → 直击命中(hitDamage=35 按距离衰减)
+       *  约 2~3 发可毁(略厚于静态虎式 40),体感耐打但不至于无反应。 */
+      maxHp: 60,
+      /** HP 低于 maxHp × 此比例 → 开始冒烟(受伤状态视觉反馈),同静态坦克 */
+      smokeThreshold: 0.6,
+      /** 击毁大爆炸尺寸缩放(相对普通炮弹爆炸),同静态坦克 destroyExplosionScale */
+      destroyExplosionScale: 4,
+      /** 击毁浓烟尺寸缩放(相对受伤小烟),同静态坦克 destroySmokeScale */
+      destroySmokeScale: 1.6,
     },
   },
 
@@ -346,8 +359,21 @@ export const CONFIG = {
 
   /** 静态展示坦克(可破坏目标：HP 归零被炸翻) */
   staticTank: {
-    /** 被击毁时受爆心方向的爆炸冲量(把坦克掀翻/炸飞) */
-    destroyImpulse: 28,
+    /** 被击毁时受爆心方向的爆炸冲量(把坦克掀翻/炸飞)。
+     *  注:碰撞体已设密度(density=2),击毁后总质量≈collider质量(73)+附加质量(30)≈103,
+     *  较早期"无密度+附加30"的 30kg 重约 3.4 倍,故冲量同步放大约 3.4 倍以保持原飞翻手感。 */
+    destroyImpulse: 95,
+    /** 击毁转 dynamic 后的"附加"质量(kg):叠加在碰撞体密度算出的质量之上微调手感。
+     *  (碰撞体已设密度,保证转 dynamic 时质量>0;此值仅作附加,不再承担"补质量防 0"职责) */
+    destroyedMass: 30,
+    /** HP 低于 maxHp × 此比例 → 开始冒烟(受伤状态视觉反馈) */
+    smokeThreshold: 0.6,
+    /** 击毁时飞溅的碎片数 */
+    fragmentCount: 6,
+    /** 击毁大爆炸的尺寸缩放(相对普通炮弹爆炸):4=粒子数×4、粒子更大、持续更久,猛烈震撼 */
+    destroyExplosionScale: 4,
+    /** 击毁浓烟的尺寸缩放(相对受伤小烟):1.6=烟更浓更密更持久,挡住视线后再散去露出焦黑车体 */
+    destroySmokeScale: 1.6,
     /** 德国虎式坦克(二战)：垂直方盒装甲、长车身、长88mm炮、德军迷彩 */
     tiger: {
       // 车身:垂直方盒装甲(写实虎式),加厚(高 1.3)显得敦实厚重有分量;
@@ -356,14 +382,16 @@ export const CONFIG = {
         bottomHalfX: 1.18, topHalfX: 1.18, // 略加宽(厚重感),垂直装甲
         bottomHalfZ: 2.4, topHalfZ: 2.4, // 长度缩(原2.9)
         height: 1.3, centerY: 0.9, // 再加厚(1.15→1.3)+ 上移,座于履带间更敦实厚重
+        /** 车首下斜板(三角楔:后缘贴车体前端、斜面从前顶下倾到前底,无悬空) */
+        frontSlope: { halfX: 1.18, halfDepth: 0.5, halfHeight: 0.65, x: 0, y: 0.9, z: 2.9 },
       },
       track: { halfX: 0.28, halfY: 0.3, halfZ: 2.4, offsetX: 1.18, centerY: 0.45, texRepeat: 12 },
       roadWheel: { count: 8, radius: 0.3, halfWidth: 0.16, offsetX: 1.18, centerY: 0.45, zSpan: 2.1 },
       /** 交错式负重轮(虎式标志)：内排轮偏移半距,视觉上呈交错排列 */
       roadWheelStagger: { radius: 0.26, halfWidth: 0.16, offsetX: 1.05, centerY: 0.45, zSpan: 2.1, zHalfStep: true },
       fender: { halfX: 0.24, halfY: 0.05, halfZ: 2.45, offsetX: 1.36, centerY: 1.05 },
-      /** 侧裙板(遮住交错轮组,侧面更整洁有装甲感) */
-      sideSkirt: { halfX: 0.05, halfY: 0.45, halfZ: 2.2, offsetX: 1.4, centerY: 0.45 },
+      /** 侧裙板(虎式 Schürzen 护板:仅遮履带顶端,露出交错轮组的标志造型) */
+      sideSkirt: { halfX: 0.05, halfY: 0.18, halfZ: 2.2, offsetX: 1.42, centerY: 0.78 },
       turret: {
         offset: { x: 0, y: 1.55, z: -0.3 }, // 炮塔随加厚车体上移(1.36→1.55),坐稳车顶
         // 炮塔主体:前后非对称楔形(正面厚、后部急剧收薄 → 真楔形,非对称截头锥)
@@ -396,7 +424,7 @@ export const CONFIG = {
       number: '231',
       /** 贴花:德军黑十字(Balkenkreuz)贴炮塔两侧 */
       decal: { cross: true, crossColor: 0x1a1a1a },
-      maxHp: 200, // 重装甲(虎式正面 100mm)→ 很抗揍
+      maxHp: 40, // 重装甲但游戏化:3~4 发可毁(原 200 太高体感无反应)
     },
     /** M1 艾布拉姆斯(现代主战)：倾斜复合装甲、楔形炮塔、7对大负重轮、沙漠迷彩 */
     abrams: {
@@ -406,6 +434,8 @@ export const CONFIG = {
         height: 1.0, centerY: 0.85, // 加厚(原0.75→1.0)+上移,座于履带间更敦实厚重
         /** 车首驾驶舱凸起(M1 前上装甲板上的驾驶舱,标志性前凸) */
         frontHatch: { halfX: 0.4, halfY: 0.22, halfZ: 0.45, x: 0, y: 1.3, z: 1.6 },
+        /** 车首下斜板(三角楔:M1 标志性大倾角 lower glacis,后缘贴车体前端、斜面前伸接地) */
+        frontSlope: { halfX: 1.35, halfDepth: 0.45, halfHeight: 0.5, x: 0, y: 0.85, z: 3.05 },
       },
       track: { halfX: 0.32, halfY: 0.32, halfZ: 2.6, offsetX: 1.35, centerY: 0.4, texRepeat: 13 },
       roadWheel: { count: 7, radius: 0.36, halfWidth: 0.2, offsetX: 1.35, centerY: 0.4, zSpan: 2.2 },
@@ -456,14 +486,14 @@ export const CONFIG = {
       number: 'A11',
       /** 贴花:战术编号(无十字,美军风格) */
       decal: { cross: false, crossColor: 0x1a1a1a },
-      maxHp: 160, // 贫铀复合装甲→抗揍但略低于虎式(体型小些)
+      maxHp: 30, // 贫铀复合装甲但游戏化:2~3 发可毁(原 160 太高体感无反应)
     },
   },
 
   /** 山(四周背景，静态不可破坏，环形围合村庄) */
   mountain: {
     ringRadius: 95, // 山环半径(贴地形边缘)
-    count: 12, // 山的数量
+    count: 18, // 山的数量
     radiusMin: 12, radiusMax: 24, // 山底半径范围
     heightMin: 16, heightMax: 32, // 山高范围
     color: 0x4a4a3a, // 山体灰绿

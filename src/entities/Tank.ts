@@ -19,6 +19,10 @@ import { CONFIG } from '../config';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { RenderScene } from '../core/RenderScene';
 import { SyncBridge } from '../core/SyncBridge';
+import { Smoke } from '../effects/Smoke';
+import { Explosion } from '../effects/Explosion';
+import type { Damageable } from './Damageable';
+import type { Fragment } from './Destructible';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Tank');
@@ -60,7 +64,7 @@ const log = Logger.create('Tank');
  *             拼合后侧面轮廓为胶囊(两端圆弧)。
  * 履带滚动：链节纹理沿长度方向(u 轴)分布，offset.x 累加 → 链节逐个滚过。
  */
-export class Tank {
+export class Tank implements Damageable {
   readonly body: RAPIER.RigidBody;
   /** collider handle，供 DestructionSystem 识别坦克参与碰撞(撞击破坏用) */
   readonly colliderHandle: number;
@@ -80,6 +84,16 @@ export class Tank {
   private readonly physics: PhysicsWorld;
   private readonly render: RenderScene;
 
+  // —— 损坏系统(HP 机制,实现 Damageable,逻辑模式同 StaticTank) ——
+  /** 状态:完好 / 已击毁(击毁后停止操控且不再受击) */
+  state: 'intact' | 'destroyed' = 'intact';
+  private hp: number;
+  private readonly startHp: number;
+  /** 击毁大爆炸特效(自行维护寿命,update 推进) */
+  private readonly explosions: Explosion[] = [];
+  /** 受伤冒烟源(HP 低于阈值激活,挂车身) */
+  private smoke?: Smoke;
+
   constructor(
     physics: PhysicsWorld,
     render: RenderScene,
@@ -87,6 +101,9 @@ export class Tank {
   ) {
     this.physics = physics;
     this.render = render;
+    const dmg = CONFIG.tank.damage;
+    this.hp = dmg.maxHp;
+    this.startHp = dmg.maxHp;
     const cfg = CONFIG.tank;
     const bh = cfg.bodyHalf;
 
@@ -439,6 +456,99 @@ export class Tank {
   }
 
   /**
+   * 受击(由 DestructionSystem.applyDamage 调用,实现 Damageable)。
+   * 反馈:① 冒烟(HP 低于阈值,越接近击毁越浓) ② 击毁→大爆炸+浓烟+烧焦。
+   * 模式与 StaticTank.takeHit 一致,便于未来 AI 坦克统一处理。
+   * @returns 玩家坦克被击毁时不产生飞溅碎片(保留造型),始终返回空数组。
+   */
+  takeHit(epicenter: { x: number; y: number; z: number }, damage: number): Fragment[] {
+    if (this.state !== 'intact') return [];
+    this.hp -= damage;
+    // 冒烟(HP 低于阈值 → 激活,越接近击毁越浓)
+    const cfg = CONFIG.tank.damage;
+    const ratio = this.hp / this.startHp;
+    if (ratio <= cfg.smokeThreshold) {
+      this.ensureSmoke();
+      // 强度:刚过阈值→0.3,临近击毁→1
+      const intensity = 0.3 + 0.7 * (1 - ratio / cfg.smokeThreshold);
+      this.smoke!.setIntensity(intensity);
+    }
+    log.debug('tank hit', { hp: this.hp.toFixed(1), damage: damage.toFixed(1) });
+    if (this.hp <= 0) this.destroy(epicenter);
+    return [];
+  }
+
+  /** 懒创建冒烟源(挂车身中上部) */
+  private ensureSmoke(): void {
+    if (this.smoke) return;
+    this.smoke = new Smoke(new Vector3(0, 1.2, 0));
+    this.group.add(this.smoke.group);
+  }
+
+  /**
+   * 击毁:① 烧焦变黑 ② 大爆炸 ③ 升级浓烟。
+   * ------------------------------------------------------------
+   * 与 StaticTank.destroy 的区别:玩家坦克本就是 dynamic 且要保留造型,
+   * 不做 fixed→dynamic 翻倒、不炸飞炮塔、不撒碎片(车体完整烧焦即可),
+   * 故不需要爆心方向参数(以 _ 前缀标记有意未用)。
+   * 被毁后 state='destroyed',TankController/WeaponSystem 据此停止操控。
+   */
+  private destroy(_epicenter: { x: number; y: number; z: number }): void {
+    this.state = 'destroyed';
+    const cfg = CONFIG.tank.damage;
+    // ① 烧焦变黑(遍历 group 所有材质,去迷彩/纹理、压暗哑光)
+    this.scorch();
+    // ② 大爆炸(于车身位置生成放大爆炸,scale>1 粒子更多更大更久)
+    const t = this.body.translation();
+    this.explosions.push(new Explosion(this.render, t, cfg.destroyExplosionScale));
+    // ③ 升级浓烟(持续冒浓烟挡住视线,烟散后露出焦黑车体)
+    if (this.smoke) this.smoke.dispose();
+    this.smoke = new Smoke(new Vector3(0, 1.2, 0), cfg.destroySmokeScale);
+    this.group.add(this.smoke.group);
+    this.smoke.setIntensity(1);
+    log.info('tank DESTROYED', { at: t });
+  }
+
+  /**
+   * 烧焦变黑:遍历 group 所有 MeshStandardMaterial 变为焦黑破损外观
+   * (去迷彩/纹理、压暗、哑光),与 StaticTank.scorch 同手法。
+   */
+  private scorch(): void {
+    this.group.traverse((obj) => {
+      const mesh = obj as Mesh;
+      if (!mesh.isMesh) return;
+      const m = mesh.material;
+      const scorchOne = (mm: Material): void => {
+        const sm = mm as MeshStandardMaterial;
+        if (!sm.isMaterial) return;
+        // 仅处理 PBR 标准材质(贴花等也属于此类,一并烧焦)
+        if ((sm as unknown as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial) {
+          sm.map = null;              // 去除迷彩/履带/贴花纹理
+          sm.color.setHex(0x141414);  // 焦黑
+          sm.roughness = 0.98;
+          sm.metalness = 0.15;
+          sm.transparent = false;     // 贴花材质原本半透明,烧焦后实心
+          sm.alphaTest = 0;
+          sm.needsUpdate = true;
+        }
+      };
+      if (Array.isArray(m)) for (const mm of m) scorchOne(mm);
+      else if (m) scorchOne(m);
+    });
+  }
+
+  /** 每帧更新:驱动冒烟 + 推进击毁大爆炸粒子(寿命到回收)。由 DestructionSystem.update 调用。 */
+  update(dt: number): void {
+    if (this.smoke) this.smoke.update(dt);
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const e = this.explosions[i];
+      if (e.update(dt)) continue;
+      e.dispose(this.render);
+      this.explosions.splice(i, 1);
+    }
+  }
+
+  /**
    * 彻底销毁(场景重置用)：解绑车身刚体、移除网格、释放全部 GPU 资源。
    * 坦克部件众多(几十个 mesh + 多套独有材质/CanvasTexture/几何)，逐个手维护易遗漏，
    * 故遍历 group 收集所有 geometry / material / material.map 去重后统一释放。
@@ -449,6 +559,14 @@ export class Tank {
     SyncBridge.unbind(this.body);
     this.physics.world.removeRigidBody(this.body);
     this.render.scene.remove(this.group);
+
+    // 清理损坏特效(冒烟 + 击毁大爆炸)
+    for (const e of this.explosions) e.dispose(this.render);
+    this.explosions.length = 0;
+    if (this.smoke) {
+      this.smoke.dispose();
+      this.smoke = undefined;
+    }
 
     const geos = new Set<BufferGeometry>();
     const mats = new Set<Material>();
@@ -632,6 +750,66 @@ export function makeWedgeGeometry(h: {
       uvs.push(faceUV[i][0], faceUV[i][1]);
     }
     index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new Float32BufferAttribute(uvs, 2));
+  geo.setIndex(index);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * 车首下斜板几何(lower glacis)。
+ * ------------------------------------------------------------
+ * 生成一个三角楔(三棱柱),作为车头向下倾斜的装甲板,严丝合缝接在车体前端:
+ *   - 后竖直面贴车体前端面
+ *   - 顶面水平,与车体顶面前缘齐平
+ *   - 斜面从前顶缘连续下倾到前底缘(贴向地面)
+ *   - 宽度 halfX 与车体同宽
+ * 这样斜板与车体连成整体,无空隙,呈"梯形往下"的车头造型。
+ *
+ * @param halfX     宽度半(与车体同宽)
+ * @param halfDepth 深度半(前后向,后缘贴车体前端、前缘为斜板接地端)
+ * @param halfHeight 高度半(顶面 y=+hh 接车体顶端,底面 y=-hh 接车体底端)
+ */
+export function makeGlacisGeometry(halfX: number, halfDepth: number, halfHeight: number): BufferGeometry {
+  const x = halfX, d = halfDepth, hh = halfHeight;
+  const P: number[][] = [
+    [-x, -hh, -d], [x, -hh, -d], // 0,1 底后(贴车体底前端)
+    [-x, hh, -d], [x, hh, -d], // 2,3 顶后(贴车体顶前端)
+    [-x, -hh, d], [x, -hh, d], // 4,5 前缘(斜面收尖到此,接地面附近)
+  ];
+  const faces: number[][] = [
+    [0, 1, 5, 4], // 底面 -y
+    [2, 3, 1, 0], // 后竖直面 -z(贴车体前端面)
+    [2, 0, 4], // 左侧 -x(三角形)
+    [3, 5, 1], // 右侧 +x(三角形,绕向外)
+    [3, 2, 4, 5], // 主斜面(顶后→前缘,下倾)
+  ];
+  const faceUV = [
+    [0, 0], [1, 0], [1, 1], [0, 1],
+  ];
+  const triUV = [
+    [0, 0], [1, 0], [0, 1],
+  ];
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const index: number[] = [];
+  for (let fi = 0; fi < faces.length; fi++) {
+    const f = faces[fi];
+    const uvSet = f.length === 3 ? triUV : faceUV;
+    const base = positions.length / 3;
+    for (let i = 0; i < f.length; i++) {
+      const p = P[f[i]];
+      positions.push(p[0], p[1], p[2]);
+      uvs.push(uvSet[i][0], uvSet[i][1]);
+    }
+    if (f.length === 3) {
+      index.push(base, base + 1, base + 2);
+    } else {
+      index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
   }
   const geo = new BufferGeometry();
   geo.setAttribute('position', new Float32BufferAttribute(positions, 3));

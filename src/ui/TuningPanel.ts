@@ -41,10 +41,18 @@ const TUNABLES: Tunable[] = [
  * CONFIG 是 `as const`(类型层 readonly)，但运行时是普通对象可写；
  * 用 any cast 写入绕过类型层，各模块读 CONFIG.xxx 即得新值。
  */
+/** 调试用回调(由 main 注入:模拟对玩家/静态坦克的一次受击,验证损坏链) */
+export interface TuningDebugHooks {
+  /** 模拟对玩家坦克的一次满伤受击 */
+  simulatePlayerHit?: () => void;
+  /** 模拟对最近静态坦克的一次满伤受击 */
+  simulateStaticHit?: () => void;
+}
+
 export class TuningPanel {
-  constructor() {
+  constructor(hooks?: TuningDebugHooks) {
     this.restore();
-    this.buildUI();
+    this.buildUI(hooks);
     log.info('tuning panel ready', { count: TUNABLES.length });
   }
 
@@ -101,7 +109,7 @@ export class TuningPanel {
     }
   }
 
-  private buildUI(): void {
+  private buildUI(hooks?: TuningDebugHooks): void {
     const panel = document.createElement('div');
     Object.assign(panel.style, panelStyle);
 
@@ -148,6 +156,29 @@ export class TuningPanel {
       row.appendChild(lab);
       row.appendChild(slider);
       body.appendChild(row);
+    }
+
+    // —— 调试:模拟受击(验证玩家/静态坦克损坏链,无需 AI 攻击者) ——
+    if (hooks && (hooks.simulatePlayerHit || hooks.simulateStaticHit)) {
+      const dbgTitle = document.createElement('div');
+      Object.assign(dbgTitle.style, dbgTitleStyle);
+      dbgTitle.textContent = '🧪 损坏调试';
+      body.appendChild(dbgTitle);
+
+      if (hooks.simulatePlayerHit) {
+        const btn = document.createElement('button');
+        btn.textContent = '模拟受击(玩家)';
+        Object.assign(btn.style, dbgBtnStyle);
+        btn.onclick = (): void => hooks.simulatePlayerHit!();
+        body.appendChild(btn);
+      }
+      if (hooks.simulateStaticHit) {
+        const btn = document.createElement('button');
+        btn.textContent = '模拟受击(静态)';
+        Object.assign(btn.style, dbgBtnStyle);
+        btn.onclick = (): void => hooks.simulateStaticHit!();
+        body.appendChild(btn);
+      }
     }
 
     const reset = document.createElement('button');
@@ -212,6 +243,24 @@ const resetBtnStyle: Partial<CSSStyleDeclaration> = {
   padding: '5px',
   background: '#3a4048',
   color: '#e6e6e6',
+  border: 'none',
+  borderRadius: '4px',
+  cursor: 'pointer',
+  fontFamily: 'monospace',
+  fontSize: '12px',
+};
+const dbgTitleStyle: Partial<CSSStyleDeclaration> = {
+  marginTop: '6px',
+  marginBottom: '4px',
+  fontWeight: 'bold',
+  color: '#ffb86b',
+};
+const dbgBtnStyle: Partial<CSSStyleDeclaration> = {
+  width: '100%',
+  padding: '5px',
+  marginBottom: '4px',
+  background: '#5a3a2a',
+  color: '#ffe6cc',
   border: 'none',
   borderRadius: '4px',
   cursor: 'pointer',

@@ -56,11 +56,11 @@ export class WeaponSystem {
   }
 
   update(input: InputState, dt: number): void {
-    // 冷却 + 边沿触发开火(按一次打一发)
+    // 冷却 + 边沿触发开火(按一次打一发)。被击毁后无法开火。
     this.cooldown -= dt;
     const edge = input.fire && !this.prevFire;
     this.prevFire = input.fire;
-    if (edge && this.cooldown <= 0) {
+    if (edge && this.cooldown <= 0 && this.tank.state === 'intact') {
       this.fire();
       this.cooldown = CONFIG.weapon.fireCooldown;
     }
@@ -153,8 +153,9 @@ export class WeaponSystem {
     if (explode) {
       const t = p.body.translation();
       this.explosions.push(new Explosion(this.render, t));
-      // 通知破坏系统：爆炸半径内的可破坏物触发破碎
-      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius);
+      // 通知破坏系统：爆炸半径内的可破坏物触发破碎。
+      // excludePlayer=true:玩家自身炮弹,跳过对玩家的伤害(防开火自伤)。
+      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius, true);
       log.info('HIT', {
         at: `${t.x.toFixed(1)},${t.y.toFixed(1)},${t.z.toFixed(1)}`,
       });
