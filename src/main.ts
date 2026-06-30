@@ -6,12 +6,15 @@ import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
 import { Tank } from './entities/Tank';
 import { StaticTank } from './entities/StaticTank';
+import type { IControllableTank } from './entities/IControllableTank';
 import { InputSystem } from './systems/InputSystem';
 import { TankController } from './systems/TankController';
+import { TankSwitcher } from './systems/TankSwitcher';
 import { WeaponSystem } from './systems/WeaponSystem';
 import { DestructionSystem } from './systems/DestructionSystem';
 import { CameraShake } from './effects/CameraShake';
 import { TuningPanel } from './ui/TuningPanel';
+import { HUD } from './ui/HUD';
 import { Logger } from './utils/Logger';
 
 const log = Logger.create('main');
@@ -22,6 +25,8 @@ const log = Logger.create('main');
  * 主循环时序：
  *   applyDrive → physics.step → SyncBridge.sync
  *   → aimAndCamera → weapon.update → shake.update → destruction.update → render
+ *
+ * 调试模式支持按 Tab 在玩家 T-14 与静态坦克（虎式/M1）之间切换控制。
  */
 async function main(): Promise<void> {
   const container = document.getElementById('app');
@@ -30,16 +35,21 @@ async function main(): Promise<void> {
   // destruction/tank 在下方创建,但调试回调需引用它们;
   // 用 let 占位 + 闭包捕获,按钮点击时(模块均已建好)才读取。
   let destructionRef: DestructionSystem | undefined;
-  let tankRef: Tank | undefined;
+  let switcherRef: TankSwitcher | undefined;
 
   // 调参面板(最早创建：restore 先覆盖 CONFIG 默认值，之后所有模块读到调参后的值)。
   // 调试回调注入:点击"模拟受击"按钮 → 在目标附近生成满伤爆心,验证损坏链(无需 AI 攻击者)。
-  new TuningPanel({
+  const tuningPanel = new TuningPanel({
+    switchTank: (): void => {
+      switcherRef?.next();
+    },
     simulatePlayerHit: (): void => {
-      const d = destructionRef, tank = tankRef;
+      const d = destructionRef;
+      const tank = switcherRef?.activeTank;
       if (!d || !tank) return;
-      // 爆心设在玩家刚体前方 0.8m(车身内,排除自伤距离 < 玩家尺寸) → falloff 接近满伤。
-      // applyDamage 对玩家自身开火有 excludePlayer 保护,此为外部模拟,正常判定。
+      // 爆心设在当前活性坦克刚体前方 0.8m(车身内,排除自伤距离 < 坦克尺寸) → falloff 接近满伤。
+      // applyDamage 会自动跳过 activeTank,但这里我们故意想让它受伤,
+      // 所以爆心稍微偏移,让它落在 activeTank 的判定半径内。
       const t = tank.body.translation();
       d.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
     },
@@ -52,6 +62,7 @@ async function main(): Promise<void> {
 
   const physics = await PhysicsWorld.create();
   const render = new RenderScene(container);
+  const hud = new HUD(container);
 
   buildGround(physics, render);
   buildMountains(physics, render);
@@ -63,20 +74,42 @@ async function main(): Promise<void> {
   buildStaticTanks(physics, render, destruction);
 
   const bh = CONFIG.tank.bodyHalf;
-  const tank = new Tank(physics, render, { x: 0, y: bh.y + 0.1, z: -8 });
-  tankRef = tank;
-  destruction.setPlayerTank(tank);
+  const playerTank = new Tank(physics, render, { x: 0, y: bh.y + 0.1, z: -8 });
+
+  // 可附身坦克列表：玩家 T-14 + 两辆静态展示坦克
+  const staticTanks = destruction.getStaticTanks();
+  const controllableTanks: IControllableTank[] = [
+    playerTank,
+    staticTanks[0],
+    staticTanks[1],
+  ];
+
+  const switcher = new TankSwitcher(controllableTanks, 0);
+  switcherRef = switcher;
+  destruction.setControllableTanks(controllableTanks);
+  destruction.setActiveTank(switcher.activeTank);
+  tuningPanel.setTankName(switcher.activeTank.name);
 
   const input = new InputSystem();
   input.attach();
 
-  const controller = new TankController(tank, render);
+  const controller = new TankController(switcher.activeTank, render);
   const shake = new CameraShake(render.camera);
-  const weapon = new WeaponSystem(tank, physics, render, shake, destruction);
+  const weapon = new WeaponSystem(() => switcher.activeTank, physics, render, shake, destruction);
 
-  startLoop(physics, render, input, tank, controller, weapon, shake, destruction);
+  // 切换坦克回调：释放旧单位、附身新单位、重置控制器、更新各子系统
+  switcher.onSwitch = (newTank, oldTank): void => {
+    oldTank.release();
+    newTank.possess();
+    controller.setTank(newTank);
+    controller.snapCamera();
+    destruction.setActiveTank(newTank);
+    tuningPanel.setTankName(newTank.name);
+  };
+
+  startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud);
   log.info('boot complete', {
-    hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火',
+    hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / Tab 切换坦克',
   });
 }
 
@@ -208,11 +241,12 @@ function startLoop(
   physics: PhysicsWorld,
   render: RenderScene,
   input: InputSystem,
-  tank: Tank,
+  switcher: TankSwitcher,
   controller: TankController,
   weapon: WeaponSystem,
   shake: CameraShake,
   destruction: DestructionSystem,
+  hud: HUD,
 ): void {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
@@ -220,6 +254,7 @@ function startLoop(
   let last = performance.now();
   let acc = 0;
   let frame = 0;
+  let prevSwitchNext = false;
 
   const loop = (): void => {
     const now = performance.now();
@@ -228,6 +263,15 @@ function startLoop(
     if (frameTime > 0.25) frameTime = 0.25;
 
     const state = input.state;
+
+    // Tab 边沿触发切换坦克
+    if (state.switchNext && !prevSwitchNext) {
+      switcher.next();
+    }
+    prevSwitchNext = state.switchNext;
+
+    const activeTank = switcher.activeTank;
+    hud.update(activeTank);
 
     controller.applyDrive(state);
     acc += frameTime;
@@ -255,12 +299,13 @@ function startLoop(
 
     frame++;
     if (frame % 30 === 0) {
-      const t = tank.body.translation();
-      const v = tank.body.linvel();
+      const t = activeTank.body.translation();
+      const v = activeTank.body.linvel();
       const aim = controller.aimInfo;
       const w = weapon.stats;
       const d = destruction.stats;
       log.debug('diag', {
+        tank: activeTank.name,
         pos: `${t.x.toFixed(1)},${t.y.toFixed(2)},${t.z.toFixed(1)}`,
         spd: Math.hypot(v.x, v.z).toFixed(2),
         turret: `${aim.turretDeg.toFixed(0)}°`,

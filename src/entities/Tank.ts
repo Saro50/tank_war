@@ -23,6 +23,7 @@ import { Smoke } from '../effects/Smoke';
 import { Explosion } from '../effects/Explosion';
 import type { Damageable } from './Damageable';
 import type { Fragment } from './Destructible';
+import type { IControllableTank, DriveConfig } from './IControllableTank';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Tank');
@@ -64,7 +65,7 @@ const log = Logger.create('Tank');
  *             拼合后侧面轮廓为胶囊(两端圆弧)。
  * 履带滚动：链节纹理沿长度方向(u 轴)分布，offset.x 累加 → 链节逐个滚过。
  */
-export class Tank implements Damageable {
+export class Tank implements Damageable, IControllableTank {
   readonly body: RAPIER.RigidBody;
   /** collider handle，供 DestructionSystem 识别坦克参与碰撞(撞击破坏用) */
   readonly colliderHandle: number;
@@ -74,6 +75,7 @@ export class Tank implements Damageable {
   readonly turret: Group;
   readonly barrel: Group;
   readonly muzzle: Object3D;
+  readonly name = 'T-14 03';
 
   private readonly leftTrackTex: CanvasTexture;
   private readonly rightTrackTex: CanvasTexture;
@@ -439,6 +441,31 @@ export class Tank implements Damageable {
   get barrelBaseZ(): number {
     return CONFIG.tank.barrel.offset.z;
   }
+
+  /** 当前运行参数（玩家 T-14 直接映射全局 CONFIG.tank） */
+  get driveConfig(): DriveConfig {
+    const c = CONFIG.tank;
+    return {
+      moveSpeed: c.moveSpeed,
+      turnSpeed: c.turnSpeed,
+      accelLerp: c.accelLerp,
+      reverseScale: c.reverseScale,
+      turret: { turnSpeed: c.turret.turnSpeed, omegaLerp: c.turret.omegaLerp },
+      barrel: { pitchRange: c.barrel.pitchRange, pitchSpeed: c.barrel.pitchSpeed },
+      track: { offsetX: c.track.offsetX, halfZ: c.track.halfZ, rollScale: c.track.rollScale },
+      camera: { offset: c.camera.offset, lookOffset: c.camera.lookOffset, lerp: c.camera.lerp },
+      dust: { minSpeed: c.dust.minSpeed, spawnPerMeter: c.dust.spawnPerMeter },
+      sway: { pitchScale: c.sway.pitchScale, rollScale: c.sway.rollScale, lerp: c.sway.lerp },
+    };
+  }
+
+  getHp(): number {
+    return this.hp;
+  }
+
+  /** 玩家坦克本来就是 dynamic，附身/取消无需操作 */
+  possess(): void {}
+  release(): void {}
 
   /**
    * 更新履带滚动(每帧由 controller 调用)

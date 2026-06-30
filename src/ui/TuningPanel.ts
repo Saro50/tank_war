@@ -47,13 +47,22 @@ export interface TuningDebugHooks {
   simulatePlayerHit?: () => void;
   /** 模拟对最近静态坦克的一次满伤受击 */
   simulateStaticHit?: () => void;
+  /** 切换当前附身坦克 */
+  switchTank?: () => void;
 }
 
 export class TuningPanel {
+  private tankNameLabel?: HTMLDivElement;
+
   constructor(hooks?: TuningDebugHooks) {
     this.restore();
     this.buildUI(hooks);
     log.info('tuning panel ready', { count: TUNABLES.length });
+  }
+
+  /** 更新面板中显示的当前附身坦克名称 */
+  setTankName(name: string): void {
+    if (this.tankNameLabel) this.tankNameLabel.textContent = `当前: ${name}`;
   }
 
   /** 从 localStorage 恢复调参 → 覆盖 CONFIG 默认值 */
@@ -158,12 +167,25 @@ export class TuningPanel {
       body.appendChild(row);
     }
 
-    // —— 调试:模拟受击(验证玩家/静态坦克损坏链,无需 AI 攻击者) ——
-    if (hooks && (hooks.simulatePlayerHit || hooks.simulateStaticHit)) {
+    // —— 调试:坦克切换 + 模拟受击(验证损坏链,无需 AI 攻击者) ——
+    if (hooks && (hooks.simulatePlayerHit || hooks.simulateStaticHit || hooks.switchTank)) {
       const dbgTitle = document.createElement('div');
       Object.assign(dbgTitle.style, dbgTitleStyle);
-      dbgTitle.textContent = '🧪 损坏调试';
+      dbgTitle.textContent = '🧪 调试工具';
       body.appendChild(dbgTitle);
+
+      if (hooks.switchTank) {
+        this.tankNameLabel = document.createElement('div');
+        Object.assign(this.tankNameLabel.style, dbgLabelStyle);
+        this.tankNameLabel.textContent = '当前: —';
+        body.appendChild(this.tankNameLabel);
+
+        const btn = document.createElement('button');
+        btn.textContent = '切换坦克 (Tab)';
+        Object.assign(btn.style, dbgBtnStyle);
+        btn.onclick = (): void => hooks.switchTank!();
+        body.appendChild(btn);
+      }
 
       if (hooks.simulatePlayerHit) {
         const btn = document.createElement('button');
@@ -254,6 +276,11 @@ const dbgTitleStyle: Partial<CSSStyleDeclaration> = {
   marginBottom: '4px',
   fontWeight: 'bold',
   color: '#ffb86b',
+};
+const dbgLabelStyle: Partial<CSSStyleDeclaration> = {
+  marginBottom: '4px',
+  color: '#e6e6e6',
+  fontSize: '12px',
 };
 const dbgBtnStyle: Partial<CSSStyleDeclaration> = {
   width: '100%',

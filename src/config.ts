@@ -425,6 +425,13 @@ export const CONFIG = {
       /** 贴花:德军黑十字(Balkenkreuz)贴炮塔两侧 */
       decal: { cross: true, crossColor: 0x1a1a1a },
       maxHp: 40, // 重装甲但游戏化:3~4 发可毁(原 200 太高体感无反应)
+      /** 调试附身模式用的运行参数(履带位置/相机偏移适配更大车身) */
+      debugDrive: {
+        trackOffsetX: 1.18,
+        trackHalfZ: 2.4,
+        cameraOffset: { x: 0, y: 5.2, z: -11 },
+        cameraLookOffset: { x: 0, y: 1.6, z: 7 },
+      },
     },
     /** M1 艾布拉姆斯(现代主战)：倾斜复合装甲、楔形炮塔、7对大负重轮、沙漠迷彩 */
     abrams: {
@@ -487,6 +494,13 @@ export const CONFIG = {
       /** 贴花:战术编号(无十字,美军风格) */
       decal: { cross: false, crossColor: 0x1a1a1a },
       maxHp: 30, // 贫铀复合装甲但游戏化:2~3 发可毁(原 160 太高体感无反应)
+      /** 调试附身模式用的运行参数(履带位置/相机偏移适配更大车身) */
+      debugDrive: {
+        trackOffsetX: 1.35,
+        trackHalfZ: 2.6,
+        cameraOffset: { x: 0, y: 5.5, z: -12 },
+        cameraLookOffset: { x: 0, y: 1.7, z: 7 },
+      },
     },
   },
 

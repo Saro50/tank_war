@@ -10,6 +10,7 @@ const log = Logger.create('Input');
  *   炮塔：Q 左转 / W 右转   (turretDir: +1=右 -1=左)
  *   炮管：A 抬起 / S 放下   (barrelDir: +1=抬 -1=放)
  *   开火：Space             (fire: 是否按下)
+ *   切换：Tab               (switchNext: 是否按下，需边沿触发)
  */
 export interface InputState {
   forward: number;
@@ -17,13 +18,16 @@ export interface InputState {
   turretDir: number;
   barrelDir: number;
   fire: boolean;
+  switchNext: boolean;
 }
 
-const MOVE_KEYS = new Set([
+const BLOCKED_KEYS = new Set([
   'ArrowUp',
   'ArrowDown',
   'ArrowLeft',
   'ArrowRight',
+  'Tab',
+  'Space',
 ]);
 
 /**
@@ -45,7 +49,7 @@ export class InputSystem {
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
     this.attached = true;
-    log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火' });
+    log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / Tab 切换坦克' });
   }
 
   /** 解绑监听器(场景重置/卸载用)，防 hot-reload 后重复监听与按键卡住 */
@@ -66,6 +70,7 @@ export class InputSystem {
       turretDir: (this.has('KeyW') ? 1 : 0) - (this.has('KeyQ') ? 1 : 0),
       barrelDir: (this.has('KeyA') ? 1 : 0) - (this.has('KeyS') ? 1 : 0),
       fire: this.has('Space'),
+      switchNext: this.has('Tab'),
     };
   }
 
@@ -74,8 +79,8 @@ export class InputSystem {
   }
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    // 防方向键/空格滚动页面
-    if (MOVE_KEYS.has(e.code) || e.code === 'Space') e.preventDefault();
+    // 防方向键/空格/Tab 触发浏览器默认行为（滚动、切焦点）
+    if (BLOCKED_KEYS.has(e.code)) e.preventDefault();
     this.keys.add(e.code);
   };
 

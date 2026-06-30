@@ -1,3 +1,4 @@
+import type { IControllableTank } from '../entities/IControllableTank';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('HUD');
@@ -5,14 +6,15 @@ const log = Logger.create('HUD');
 /**
  * 平视显示器(HUD)
  * ------------------------------------------------------------
- * 职责：屏幕层 UI 元素（准星等），用 DOM 而非 Three 内绘制——
+ * 职责：屏幕层 UI 元素（准星、当前坦克信息等），用 DOM 而非 Three 内绘制——
  * 原因：准星是 2D 像素精确元素，DOM 方式最锐利、最易调样式，
  *       且不占用 canvas 绘制开销。
  *
- * M2 仅含准星；M3 起补充弹药数/命中提示。
+ * M2 仅含准星；M3 起补充弹药数/命中提示；调试模式补充当前附身坦克名称/HP。
  */
 export class HUD {
   private readonly crosshair: HTMLDivElement;
+  private readonly tankInfo: HTMLDivElement;
   private mounted = false;
 
   constructor(container: HTMLElement) {
@@ -21,6 +23,12 @@ export class HUD {
     this.crosshair.innerHTML = crosshairSVG;
     Object.assign(this.crosshair.style, crosshairStyle);
     container.appendChild(this.crosshair);
+
+    this.tankInfo = document.createElement('div');
+    Object.assign(this.tankInfo.style, tankInfoStyle);
+    this.tankInfo.textContent = '';
+    container.appendChild(this.tankInfo);
+
     this.mounted = true;
     log.info('HUD ready');
   }
@@ -33,6 +41,14 @@ export class HUD {
     if (!this.mounted) return;
     // 用 transform 而非 left/top，性能更好（不触发布局）
     this.crosshair.style.transform = `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`;
+  }
+
+  /** 每帧更新当前附身坦克信息 */
+  update(tank: IControllableTank): void {
+    if (!this.mounted) return;
+    const hp = Math.max(0, tank.getHp());
+    const state = tank.state === 'intact' ? '完好' : '已击毁';
+    this.tankInfo.textContent = `${tank.name}  |  HP ${hp}  |  ${state}`;
   }
 }
 
@@ -55,4 +71,19 @@ const crosshairStyle: Partial<CSSStyleDeclaration> = {
   pointerEvents: 'none', // 准星不拦截鼠标，否则无法点中画布
   zIndex: '10',
   willChange: 'transform',
+};
+
+const tankInfoStyle: Partial<CSSStyleDeclaration> = {
+  position: 'absolute',
+  top: '12px',
+  left: '12px',
+  zIndex: '10',
+  pointerEvents: 'none',
+  fontFamily: 'monospace',
+  fontSize: '14px',
+  color: '#e6e6e6',
+  background: 'rgba(20,22,28,0.75)',
+  padding: '6px 10px',
+  borderRadius: '6px',
+  textShadow: '0 1px 2px rgba(0,0,0,0.6)',
 };

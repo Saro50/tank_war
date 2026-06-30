@@ -7,6 +7,7 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
+  Object3D,
   PlaneGeometry,
   Quaternion,
   RepeatWrapping,
@@ -26,12 +27,18 @@ import {
 } from './Tank';
 import { Fragment } from './Destructible';
 import type { Damageable } from './Damageable';
+import type { IControllableTank, DriveConfig } from './IControllableTank';
 import { Smoke } from '../effects/Smoke';
 import { Explosion } from '../effects/Explosion';
 import { CONFIG } from '../config';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('StaticTank');
+
+// 附身模式复用临时向量（避免每帧 GC）
+const _mDirA = new Vector3();
+const _mDirB = new Vector3();
+const _muzzleWorld = new Vector3();
 
 /** 可选细节配置(某型坦克没有则该字段为 undefined) */
 type Maybe<T> = T | undefined;
@@ -81,6 +88,13 @@ type StaticTankConfig = {
   number: string;
   decal: { cross: boolean; crossColor: number };
   maxHp: number;
+  /** 调试附身模式用的运行参数 */
+  debugDrive: {
+    trackOffsetX: number;
+    trackHalfZ: number;
+    cameraOffset: { x: number; y: number; z: number };
+    cameraLookOffset: { x: number; y: number; z: number };
+  };
 };
 
 /**
@@ -115,10 +129,14 @@ function makeCrossDecalCanvas(size = 128): HTMLCanvasElement {
  * 物理:fixed 刚体(静态障碍);接入 DestructionSystem.applyDamage。
  * 破坏:HP 机制,HP≤0 时整辆转 dynamic + 爆心方向冲量 → 被炸翻。
  */
-export class StaticTank implements Damageable {
+export class StaticTank implements Damageable, IControllableTank {
   readonly body: RAPIER.RigidBody;
   readonly colliderHandle: number;
   readonly group: Group;
+  readonly turret: Group;
+  readonly barrel: Group;
+  readonly muzzle: Object3D;
+  readonly name: string;
   state: 'intact' | 'destroyed' = 'intact';
   private hp: number;
   private readonly startHp: number;
@@ -136,11 +154,11 @@ export class StaticTank implements Damageable {
   private turretBody?: RAPIER.RigidBody;
   /** 受伤冒烟源(HP 低于阈值时激活,挂在炮塔顶) */
   private smoke?: Smoke;
-  /** 炮塔引用(冒烟挂载点) */
-  private turret!: Group;
   /** 物理/渲染入口(dispose 碎片/冒烟用) */
   private physics!: PhysicsWorld;
   private render!: RenderScene;
+  private leftTrackTex!: CanvasTexture;
+  private rightTrackTex!: CanvasTexture;
 
   constructor(
     physics: PhysicsWorld,
@@ -152,6 +170,7 @@ export class StaticTank implements Damageable {
     variant: 'tiger' | 'abrams',
   ) {
     this.variant = variant;
+    this.name = variant === 'tiger' ? 'Tiger 231' : 'Abrams A11';
     const cfg: StaticTankConfig = CONFIG.staticTank[variant];
     this.hp = cfg.maxHp;
     this.startHp = cfg.maxHp;
@@ -309,7 +328,8 @@ export class StaticTank implements Damageable {
     this.addMgStation(turret, cfg.turret.mgStation, mat);
 
     // ===== 炮管(含制退器/热护套/炮盾) =====
-    const barrel = new Group();
+    this.barrel = new Group();
+    const barrel = this.barrel;
     barrel.position.set(cfg.barrel.offset.x, cfg.barrel.offset.y, cfg.barrel.offset.z);
 
     // 主炮管
@@ -320,6 +340,11 @@ export class StaticTank implements Damageable {
     barrelMesh.position.z = cfg.barrel.length / 2;
     barrelMesh.castShadow = true;
     barrel.add(barrelMesh);
+
+    // 炮口标记点(供附身模式开火取世界位置/方向)
+    this.muzzle = new Object3D();
+    this.muzzle.position.set(0, 0, cfg.barrel.length);
+    barrel.add(this.muzzle);
 
     // 炮盾(炮管根部加厚防盾)
     this.addMantlet(barrel, cfg.mantlet, mat.barrel);
@@ -505,6 +530,8 @@ export class StaticTank implements Damageable {
       const trackTex = makeTrackTexture(tr.texRepeat);
       trackTex.wrapS = trackTex.wrapT = RepeatWrapping;
       this.texs.push(trackTex);
+      if (side === -1) this.leftTrackTex = trackTex;
+      else this.rightTrackTex = trackTex;
       const trackMat = new MeshStandardMaterial({ color: c.trackMetal, map: trackTex, roughness: 0.9, metalness: 0.3 });
       this.mats.push(trackMat);
 
@@ -813,18 +840,18 @@ export class StaticTank implements Damageable {
   }
 
   /** 彻底销毁(场景重置用) */
-  dispose(physics: PhysicsWorld, render: RenderScene): void {
+  dispose(): void {
     SyncBridge.unbind(this.body);
-    physics.world.removeRigidBody(this.body);
-    render.scene.remove(this.group);
+    this.physics.world.removeRigidBody(this.body);
+    this.render.scene.remove(this.group);
     // 若炮塔已被炸飞为独立刚体(挂场景),清理其刚体+场景节点
     if (this.turretBody) {
       SyncBridge.unbind(this.turretBody);
-      physics.world.removeRigidBody(this.turretBody);
+      this.physics.world.removeRigidBody(this.turretBody);
       this.turretBody = undefined;
-      render.scene.remove(this.turret);
+      this.render.scene.remove(this.turret);
     }
-    for (const e of this.explosions) e.dispose(render);
+    for (const e of this.explosions) e.dispose(this.render);
     this.explosions.length = 0;
     if (this.smoke) {
       this.smoke.dispose();
@@ -833,5 +860,73 @@ export class StaticTank implements Damageable {
     for (const t of this.texs) t.dispose();
     for (const m of this.mats) m.dispose();
     for (const g of this.geos) g.dispose();
+  }
+
+  // ============================================================
+  // 附身模式：让 StaticTank 也能被玩家驾驶/开火
+  // ============================================================
+
+  get barrelBaseZ(): number {
+    return CONFIG.staticTank[this.variant].barrel.offset.z;
+  }
+
+  get driveConfig(): DriveConfig {
+    const c = CONFIG.tank;
+    const d = CONFIG.staticTank[this.variant].debugDrive;
+    return {
+      moveSpeed: c.moveSpeed,
+      turnSpeed: c.turnSpeed,
+      accelLerp: c.accelLerp,
+      reverseScale: c.reverseScale,
+      turret: { turnSpeed: c.turret.turnSpeed, omegaLerp: c.turret.omegaLerp },
+      barrel: { pitchRange: c.barrel.pitchRange, pitchSpeed: c.barrel.pitchSpeed },
+      track: { offsetX: d.trackOffsetX, halfZ: d.trackHalfZ, rollScale: c.track.rollScale },
+      camera: { offset: d.cameraOffset, lookOffset: d.cameraLookOffset, lerp: c.camera.lerp },
+      dust: { minSpeed: c.dust.minSpeed, spawnPerMeter: c.dust.spawnPerMeter },
+      sway: { pitchScale: c.sway.pitchScale, rollScale: c.sway.rollScale, lerp: c.sway.lerp },
+    };
+  }
+
+  getHp(): number {
+    return this.hp;
+  }
+
+  muzzleWorldPosition(): { x: number; y: number; z: number } {
+    this.group.updateMatrixWorld(true);
+    this.muzzle.getWorldPosition(_muzzleWorld);
+    return { x: _muzzleWorld.x, y: _muzzleWorld.y, z: _muzzleWorld.z };
+  }
+
+  muzzleWorldDirection(): { x: number; y: number; z: number } {
+    this.group.updateMatrixWorld(true);
+    this.muzzle.getWorldPosition(_mDirA);
+    this.barrel.getWorldPosition(_mDirB);
+    _mDirA.sub(_mDirB).normalize();
+    return { x: _mDirA.x, y: _mDirA.y, z: _mDirA.z };
+  }
+
+  updateTracks(leftVel: number, rightVel: number, dt: number): void {
+    const f = CONFIG.tank.track.rollScale;
+    this.leftTrackTex.offset.x += leftVel * dt * f;
+    this.rightTrackTex.offset.x += rightVel * dt * f;
+  }
+
+  /** 玩家附身：fixed → dynamic，锁定 X/Z 轴旋转保证驾驶稳定 */
+  possess(): void {
+    if (this.state !== 'intact') return;
+    this.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    this.body.setEnabledRotations(false, true, false, true);
+    this.body.setLinearDamping(0.6);
+    this.body.setAngularDamping(2.5);
+    log.info('static tank possessed', { name: this.name });
+  }
+
+  /** 取消附身：恢复 fixed 静态目标，停在当前位姿 */
+  release(): void {
+    if (this.state !== 'intact') return;
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.body.setBodyType(RAPIER.RigidBodyType.Fixed, true);
+    log.info('static tank released', { name: this.name });
   }
 }

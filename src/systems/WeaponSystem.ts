@@ -1,7 +1,7 @@
 import { CONFIG } from '../config';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { RenderScene } from '../core/RenderScene';
-import type { Tank } from '../entities/Tank';
+import type { IControllableTank } from '../entities/IControllableTank';
 import { Projectile } from '../entities/Projectile';
 import { Explosion } from '../effects/Explosion';
 import { MuzzleFlash } from '../effects/MuzzleFlash';
@@ -17,6 +17,8 @@ const log = Logger.create('Weapon');
  * ============================================================
  * 职责：开火判定 → 生成炮弹 → 三层后坐力 → 炮弹寿命/命中管理 → 爆炸。
  *
+ * 现在绑定“当前活性坦克”提供者，支持多坦克切换控制。
+ *
  * 后坐力三层(同时触发，叠加层次感)：
  *  1. 车身反向物理冲量 —— 车身被真推后退(物理)
  *  2. 炮管沿炮轴后缩回弹 —— 视觉强化(动画)
@@ -25,7 +27,7 @@ const log = Logger.create('Weapon');
  * 命中：每帧 drain 碰撞事件，炮弹碰到任何物体即引爆+销毁。
  */
 export class WeaponSystem {
-  private readonly tank: Tank;
+  private readonly getActiveTank: () => IControllableTank;
   private readonly physics: PhysicsWorld;
   private readonly render: RenderScene;
   private readonly shake: CameraShake;
@@ -41,13 +43,13 @@ export class WeaponSystem {
   private recoilOffset = 0; // 炮管当前后缩量(负值，回弹到 0)
 
   constructor(
-    tank: Tank,
+    getActiveTank: () => IControllableTank,
     physics: PhysicsWorld,
     render: RenderScene,
     shake: CameraShake,
     destruction: DestructionSystem,
   ) {
-    this.tank = tank;
+    this.getActiveTank = getActiveTank;
     this.physics = physics;
     this.render = render;
     this.shake = shake;
@@ -56,17 +58,19 @@ export class WeaponSystem {
   }
 
   update(input: InputState, dt: number): void {
+    const tank = this.getActiveTank();
+
     // 冷却 + 边沿触发开火(按一次打一发)。被击毁后无法开火。
     this.cooldown -= dt;
     const edge = input.fire && !this.prevFire;
     this.prevFire = input.fire;
-    if (edge && this.cooldown <= 0 && this.tank.state === 'intact') {
-      this.fire();
+    if (edge && this.cooldown <= 0 && tank.state === 'intact') {
+      this.fire(tank);
       this.cooldown = CONFIG.weapon.fireCooldown;
     }
 
-    // 炮管回缩动画
-    this.updateRecoil();
+    // 炮管回缩动画（绑定当前活性坦克）
+    this.updateRecoil(tank);
 
     // 炮弹寿命(超时静默销毁，不爆炸)
     for (const p of this.projectiles) {
@@ -98,12 +102,11 @@ export class WeaponSystem {
     return { projectiles: this.projectiles.length, explosions: this.explosions.length };
   }
 
-  private fire(): void {
+  private fire(tank: IControllableTank): void {
     const cfg = CONFIG.weapon;
-    const pos = this.tank.muzzleWorldPosition();
-    const dir = this.tank.muzzleWorldDirection();
+    const pos = tank.muzzleWorldPosition();
+    const dir = tank.muzzleWorldDirection();
     // 炮弹生成位置沿炮口方向前移 0.6m，避免与坦克车身重叠被物理弹飞
-    // (坦克变大后炮口贴近车身边缘，重叠会导致炮弹被瞬间弹向乱方向)
     const spawnPos = {
       x: pos.x + dir.x * 0.6,
       y: pos.y + dir.y * 0.6,
@@ -119,7 +122,7 @@ export class WeaponSystem {
     const J =
       cfg.projectile.mass * cfg.projectile.muzzleVelocity * cfg.recoil.bodyImpulseScale;
     const hLen = Math.hypot(dir.x, dir.z) || 1;
-    this.tank.body.applyImpulse(
+    tank.body.applyImpulse(
       { x: (-dir.x / hLen) * J, y: 0, z: (-dir.z / hLen) * J },
       true,
     );
@@ -134,28 +137,29 @@ export class WeaponSystem {
     this.shake.add(0.8);
 
     log.info('FIRE', {
+      tank: tank.name,
       muzzle: `${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}`,
       dir: `${dir.x.toFixed(2)},${dir.y.toFixed(2)},${dir.z.toFixed(2)}`,
       impulse: J.toFixed(0),
     });
   }
 
-  private updateRecoil(): void {
+  private updateRecoil(tank: IControllableTank): void {
     const cfg = CONFIG.weapon.recoil;
     this.recoilOffset = lerp(this.recoilOffset, 0, cfg.barrelRecoverLerp);
-    this.tank.barrel.position.z = this.tank.barrelBaseZ + this.recoilOffset;
+    tank.barrel.position.z = tank.barrelBaseZ + this.recoilOffset;
   }
 
   /** 引爆：alive 置 false，可选生成爆炸特效 */
-  private detonate(p: Projectile, explode: boolean): void {
+  private detonate(p: Projectile, explode: boolean, excludeTank?: IControllableTank): void {
     if (!p.alive) return;
     p.alive = false;
     if (explode) {
       const t = p.body.translation();
       this.explosions.push(new Explosion(this.render, t));
       // 通知破坏系统：爆炸半径内的可破坏物触发破碎。
-      // excludePlayer=true:玩家自身炮弹,跳过对玩家的伤害(防开火自伤)。
-      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius, true);
+      // 传入开火的坦克，防止自伤。
+      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius, excludeTank);
       log.info('HIT', {
         at: `${t.x.toFixed(1)},${t.y.toFixed(1)},${t.z.toFixed(1)}`,
       });
@@ -165,7 +169,7 @@ export class WeaponSystem {
   /** 碰撞分发回调(由 main 统一 drain 调用)：检测炮弹命中 → 引爆 */
   handleCollision(h1: number, h2: number): void {
     const p = this.projByCollider.get(h1) ?? this.projByCollider.get(h2);
-    if (p && p.alive) this.detonate(p, true);
+    if (p && p.alive) this.detonate(p, true, this.getActiveTank());
   }
 
   private cleanupProjectiles(): void {
