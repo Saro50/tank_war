@@ -18,8 +18,8 @@ export const CONFIG = {
 
   /** 地面：一个巨大固定刚体，作为碰撞基准面 */
   ground: {
-    /** 地面厚板半边长(200×200，原 4 倍面积，容纳村庄+山) */
-    halfSize: { x: 100, y: 0.5, z: 100 },
+    /** 地面厚板半边长(400×400，地图扩大一倍后的面积) */
+    halfSize: { x: 200, y: 0.5, z: 200 },
   },
 
   /** 主循环：固定步长子步法，保证模拟确定性、抗卡顿 */
@@ -525,23 +525,24 @@ export const CONFIG = {
    *  - npc:     true = 由 NpcController 驱动(机械AI);DirectorSystem 接管 possess+巡逻
    */
   tanks: [
-    { variant: 't14', spawn: { x: 0, y: 0, z: -8 }, yaw: 0, player: true, team: 'player' },
+    // 地图扩大一倍,所有坦克出生坐标 ×2,拉开战场纵深
+    { variant: 't14', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
     // 静态展示坦克(可破坏靶子,team:neutral=NPC 不主动攻击)
-    { variant: 'tiger', spawn: { x: -8, y: 0, z: -30 }, yaw: 0, player: false, team: 'neutral' },
-    { variant: 'abrams', spawn: { x: 8, y: 0, z: -30 }, yaw: 0, player: false, team: 'neutral' },
-    { variant: 'tiger', spawn: { x: -8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
-    { variant: 'abrams', spawn: { x: 8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'tiger', spawn: { x: -16, y: 0, z: -60 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'abrams', spawn: { x: 16, y: 0, z: -60 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'tiger', spawn: { x: -16, y: 0, z: 60 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'abrams', spawn: { x: 16, y: 0, z: 60 }, yaw: 0, player: false, team: 'neutral' },
     // NPC 敌坦(team:enemy + npc:true)。DirectorSystem 启动时接管,轮询分配巡逻区域。
     // 多辆分布东/西/北三个生成点(enemyFaction.spawnPoints),对应 east/north/south 巡逻区,避免挤一起
-    { variant: 'tiger', spawn: { x: 25, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true },
-    { variant: 'abrams', spawn: { x: -25, y: 0, z: 5 }, yaw: 0, player: false, team: 'enemy', npc: true },
-    { variant: 'tiger', spawn: { x: 0, y: 0, z: 28 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'tiger', spawn: { x: 50, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'abrams', spawn: { x: -50, y: 0, z: 10 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'tiger', spawn: { x: 0, y: 0, z: 56 }, yaw: 0, player: false, team: 'enemy', npc: true },
   ],
 
   /** NPC 机械AI参数(L3反射层 + FSM 用)。确定性,无 LLM */
   npc: {
-    sightRange: 45, // 感知半径(m),范围内发现敌方
-    fireRange: 35, // 开火射程(进入此距离且有目标→ENGAGE)
+    sightRange: 65, // 感知半径(m),地图扩大一倍后适度提升(不满倍,留战术纵深)
+    fireRange: 50, // 开火射程(同上,玩家可利用多出的距离绕侧/找掩体)
     aimTolerance: 0.06, // 瞄准收敛阈值(rad),炮塔朝向误差小于此→可开火
     retreatHpRatio: 0.25, // 血量低于此比例→RETREAT
     retreatMaxTime: 8, // retreat 持续超此秒数→强制脱离回 PATROL(无回血机制,避免无限后退)
@@ -553,17 +554,17 @@ export const CONFIG = {
 
   /** 敌方阵营资源(DirectorSystem 管理,未来 LLM 导演分配这些资源调控节奏) */
   enemyFaction: {
-    // 可生成点(DirectorSystem.spawnEnemy / 未来 LLM 调用)
+    // 可生成点(地图扩大一倍,坐标 ×2)
     spawnPoints: [
-      { x: 25, z: 0 },
-      { x: -25, z: 5 },
-      { x: 0, z: 28 },
+      { x: 50, z: 0 },
+      { x: -50, z: 10 },
+      { x: 0, z: 56 },
     ],
-    // 预定义巡逻区域(DirectorSystem.assignPatrol / LLM 调用;NPC 在 waypoints 间循环)
+    // 预定义巡逻区域(地图扩大一倍,坐标 ×2)
     patrolAreas: [
-      { id: 'north', waypoints: [{ x: 18, z: 25 }, { x: -18, z: 22 }, { x: -22, z: 8 }] },
-      { id: 'east', waypoints: [{ x: 28, z: 10 }, { x: 30, z: -8 }, { x: 22, z: -18 }] },
-      { id: 'south', waypoints: [{ x: -18, z: -22 }, { x: 0, z: -18 }, { x: 16, z: -24 }] },
+      { id: 'north', waypoints: [{ x: 36, z: 50 }, { x: -36, z: 44 }, { x: -44, z: 16 }] },
+      { id: 'east', waypoints: [{ x: 56, z: 20 }, { x: 60, z: -16 }, { x: 44, z: -36 }] },
+      { id: 'south', waypoints: [{ x: -36, z: -44 }, { x: 0, z: -36 }, { x: 32, z: -48 }] },
     ],
     maxConcurrent: 5, // 同场最大敌坦数(导演限流)
     reserveVariants: ['tiger', 'abrams'], // 可生成的型号池
@@ -571,10 +572,10 @@ export const CONFIG = {
 
   /** 山(四周背景，静态不可破坏，环形围合村庄) */
   mountain: {
-    ringRadius: 95, // 山环半径(贴地形边缘)
-    count: 18, // 山的数量
-    radiusMin: 12, radiusMax: 24, // 山底半径范围
-    heightMin: 16, heightMax: 32, // 山高范围
+    ringRadius: 190, // 山环半径(随地图扩大一倍)
+    count: 24, // 山的数量(大地图多几座,避免空旷)
+    radiusMin: 16, radiusMax: 32, // 山底半径范围(略放大,匹配更大的山环)
+    heightMin: 20, heightMax: 40, // 山高范围(略放大,视觉更壮观)
     color: 0x4a4a3a, // 山体灰绿
   },
 } as const;
