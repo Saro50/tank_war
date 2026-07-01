@@ -3,6 +3,7 @@ import { Mesh, MeshStandardMaterial, SphereGeometry } from 'three';
 import { CONFIG } from '../config';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { RenderScene } from '../core/RenderScene';
+import type { IControllableTank } from './IControllableTank';
 import { SyncBridge } from '../core/SyncBridge';
 
 /**
@@ -33,6 +34,8 @@ export class Projectile {
   life: number;
   /** 是否存活(命中/超时后置 false，待清理) */
   alive = true;
+  /** 发射者坦克:爆炸时 exclude 此坦克防自伤(友伤基础)。undefined=无主(伤害所有人) */
+  ownerTank?: IControllableTank;
 
   constructor(
     physics: PhysicsWorld,

@@ -12,10 +12,12 @@ import { TankController } from './systems/TankController';
 import { TankSwitcher } from './systems/TankSwitcher';
 import { WeaponSystem } from './systems/WeaponSystem';
 import { DestructionSystem } from './systems/DestructionSystem';
+import { DirectorSystem } from './systems/DirectorSystem';
 import { CameraShake } from './effects/CameraShake';
 import { TuningPanel } from './ui/TuningPanel';
 import { HUD } from './ui/HUD';
 import { Logger } from './utils/Logger';
+import { initDebugFlag, isDebug } from './utils/debug';
 
 const log = Logger.create('main');
 
@@ -29,6 +31,10 @@ const log = Logger.create('main');
  * 调试模式支持按 Tab 在玩家 T-14 与静态坦克（虎式/M1）之间切换控制。
  */
 async function main(): Promise<void> {
+  // 调试开关最早解析:URL ?debug 覆盖 CONFIG.debug.enabled。
+  // 必须早于 TuningPanel(门控其创建)及所有受调试影响的模块。
+  initDebugFlag();
+
   const container = document.getElementById('app');
   if (!container) throw new Error('mount container #app not found');
 
@@ -37,28 +43,29 @@ async function main(): Promise<void> {
   let destructionRef: DestructionSystem | undefined;
   let switcherRef: TankSwitcher | undefined;
 
-  // 调参面板(最早创建：restore 先覆盖 CONFIG 默认值，之后所有模块读到调参后的值)。
-  // 调试回调注入:点击"模拟受击"按钮 → 在目标附近生成满伤爆心,验证损坏链(无需 AI 攻击者)。
-  const tuningPanel = new TuningPanel({
-    switchTank: (): void => {
-      switcherRef?.next();
-    },
-    simulatePlayerHit: (): void => {
-      const d = destructionRef;
-      const tank = switcherRef?.activeTank;
-      if (!d || !tank) return;
-      // 爆心设在当前活性坦克刚体前方 0.8m(车身内,排除自伤距离 < 坦克尺寸) → falloff 接近满伤。
-      // applyDamage 会自动跳过 activeTank,但这里我们故意想让它受伤,
-      // 所以爆心稍微偏移,让它落在 activeTank 的判定半径内。
-      const t = tank.body.translation();
-      d.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
-    },
-    simulateStaticHit: (): void => {
-      const d = destructionRef;
-      if (!d) return;
-      d.simulateStaticHit();
-    },
-  });
+  // 调参面板仅调试模式创建:slider 调手感 + 模拟受击/切换坦克按钮均属调试功能。
+  // 非调试时整体不创建 → 用 config 默认值、无面板、无调试按钮。
+  const tuningPanel = isDebug()
+    ? new TuningPanel({
+        switchTank: (): void => {
+          switcherRef?.next();
+        },
+        simulatePlayerHit: (): void => {
+          const d = destructionRef;
+          const tank = switcherRef?.activeTank;
+          if (!d || !tank) return;
+          // 爆心设在当前活性坦克刚体前方 0.8m(车身内) → falloff 接近满伤。
+          // applyDamage 会自动跳过 activeTank,这里故意偏移爆心让它落在判定半径内。
+          const t = tank.body.translation();
+          d.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
+        },
+        simulateStaticHit: (): void => {
+          const d = destructionRef;
+          if (!d) return;
+          d.simulateStaticHit();
+        },
+      })
+    : undefined;
 
   const physics = await PhysicsWorld.create();
   const render = new RenderScene(container);
@@ -71,24 +78,19 @@ async function main(): Promise<void> {
   const destruction = new DestructionSystem(physics, render);
   destructionRef = destruction;
   buildVillage(destruction);
-  buildStaticTanks(physics, render, destruction);
 
-  const bh = CONFIG.tank.bodyHalf;
-  const playerTank = new Tank(physics, render, { x: 0, y: bh.y + 0.1, z: -8 });
+  // 按配置列表生成全部坦克(t14→Tank, tiger/abrams→StaticTank),统一进可附身列表
+  const { tanks: controllableTanks, switchable: switchableTanks, playerIndex } = buildTanks(physics, render, destruction);
 
-  // 可附身坦克列表：玩家 T-14 + 两辆静态展示坦克
-  const staticTanks = destruction.getStaticTanks();
-  const controllableTanks: IControllableTank[] = [
-    playerTank,
-    staticTanks[0],
-    staticTanks[1],
-  ];
-
-  const switcher = new TankSwitcher(controllableTanks, 0);
+  // switcher 只接收非 NPC 坦克(玩家 Tab 不可附身敌方,避免双重控制);destruction/director 用全部
+  const switcher = new TankSwitcher(switchableTanks, playerIndex);
   switcherRef = switcher;
   destruction.setControllableTanks(controllableTanks);
   destruction.setActiveTank(switcher.activeTank);
-  tuningPanel.setTankName(switcher.activeTank.name);
+  tuningPanel?.setTankName(switcher.activeTank.displayName);
+
+  // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。未来 LLM 接入点
+  const director = new DirectorSystem(physics, render, destruction, controllableTanks);
 
   const input = new InputSystem();
   input.attach();
@@ -104,10 +106,21 @@ async function main(): Promise<void> {
     controller.setTank(newTank);
     controller.snapCamera();
     destruction.setActiveTank(newTank);
-    tuningPanel.setTankName(newTank.name);
+    tuningPanel?.setTankName(newTank.displayName);
   };
 
-  startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud);
+  const loop = startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud, director);
+
+  // 注册清理回调：HMR/页面卸载时停止循环、解绑输入、释放资源，防止内存泄漏与重复监听
+  const cleanup = (): void => {
+    loop.stop();
+    tuningPanel?.dispose();
+    for (const tank of controllableTanks) tank.dispose();
+    render.dispose();
+  };
+  (window as unknown as { __tankWarCleanup__?: () => void }).__tankWarCleanup__?.();
+  (window as unknown as { __tankWarCleanup__?: () => void }).__tankWarCleanup__ = cleanup;
+
   log.info('boot complete', {
     hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / Tab 切换坦克',
   });
@@ -162,9 +175,8 @@ function buildVillage(destruction: DestructionSystem): void {
     ...houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.size.x, h.size.z) })),
     { x: -30, z: -2, r: 3.5 },
     { x: 32, z: 4, r: 3.5 },
-    { x: 0, z: -8, r: 4 }, // 玩家坦克出生点
-    { x: -8, z: -30, r: 4 }, // 静态虎式
-    { x: 8, z: -30, r: 4 }, // 静态 M1
+    // 坦克避让从 CONFIG.tanks 派生(而非硬编码):加坦克自动避让,无需同步两处(DRY)
+    ...CONFIG.tanks.map((t) => ({ x: t.spawn.x, z: t.spawn.z, r: 4 })),
   ];
   let placed = 0;
   let tries = 0;
@@ -187,18 +199,79 @@ function buildVillage(destruction: DestructionSystem): void {
   log.info('village built', { houses: houses.length, trees: placed });
 }
 
-/** 两辆静态展示坦克(可破坏目标)，远南侧并排陈列，朝北面向村庄/玩家 */
-function buildStaticTanks(
+/**
+ * 按配置列表生成全部坦克
+ * ------------------------------------------------------------
+ * 遍历 CONFIG.tanks,按 variant 分发创建:
+ *  - 't14'            → Tank(玩家型 dynamic 可驾驶);spawn.y 是地面,需抬高到车身中心
+ *  - 'tiger'/'abrams' → StaticTank(静态型 fixed 可附身);注册到 destruction 作可破坏目标
+ * 返回:
+ *  - tanks:       全部坦克(含NPC) → 给 destruction(受击)/director(接管NPC)
+ *  - switchable:  非NPC坦克      → 给 switcher(玩家 Tab 只切到这些,避免附身敌方双重控制)
+ *  - playerIndex: 玩家初始在 switchable 中的索引
+ *
+ * 配置 spawn.y 统一为【地面高度】,两种坦克的抬高举内化在此,
+ * 配置者无需关心各型号车身几何差异。
+ */
+function buildTanks(
   physics: PhysicsWorld,
   render: RenderScene,
   destruction: DestructionSystem,
-): void {
-  // 朝向 +z(炮管指 +z = 面向村庄)。yaw=0 即默认朝向
-  const tiger = new StaticTank(physics, render, { x: -8, y: 0, z: -30 }, 0, 'tiger');
-  const abrams = new StaticTank(physics, render, { x: 8, y: 0, z: -30 }, 0, 'abrams');
-  destruction.addStaticTank(tiger);
-  destruction.addStaticTank(abrams);
-  log.info('static tanks placed', { tiger: { x: -8, z: -30 }, abrams: { x: 8, z: -30 } });
+): { tanks: IControllableTank[]; switchable: IControllableTank[]; playerIndex: number } {
+  const tanks: IControllableTank[] = [];
+  const switchable: IControllableTank[] = [];
+  let playerIndex = -1;
+  let playerCount = 0;
+  const bh = CONFIG.tank.bodyHalf;
+
+  for (let i = 0; i < CONFIG.tanks.length; i++) {
+    const cfg = CONFIG.tanks[i];
+    let tank: IControllableTank;
+    if (cfg.variant === 't14') {
+      // Tank.spawn.y = 车身中心高度;配置给的是地面 y,抬高 bh.y + 0.1 离地间隙
+      tank = new Tank(
+        physics,
+        render,
+        { x: cfg.spawn.x, y: cfg.spawn.y + bh.y + 0.1, z: cfg.spawn.z },
+        cfg.yaw,
+      );
+    } else if (cfg.variant === 'tiger' || cfg.variant === 'abrams') {
+      // StaticTank.spawn.y 即地面 y(内部用 collider setTranslation 抬高到中心)
+      const st = new StaticTank(physics, render, cfg.spawn, cfg.yaw, cfg.variant);
+      destruction.addStaticTank(st);
+      tank = st;
+    } else {
+      // 未知型号:as const 下理论不可达,运行期兜底(永不静默失败)
+      log.error('unknown tank variant, skipped', {
+        variant: (cfg as { variant: string }).variant,
+        index: i,
+      });
+      continue;
+    }
+    tanks.push(tank);
+    // npc:true 不进 switchable:玩家 Tab 不可附身敌方,避免与 NpcController 双重控制冲突
+    const isNpc = (cfg as { npc?: boolean }).npc === true;
+    if (isNpc) {
+      if (cfg.player) log.warn('npc tank marked player, ignored for switch', { index: i });
+      continue;
+    }
+    if (cfg.player) {
+      if (playerIndex === -1) playerIndex = switchable.length;
+      playerCount++;
+    }
+    switchable.push(tank);
+  }
+
+  // player 标记异常防御(永不静默失败):缺失取首辆并警告;多辆取首辆标记的并警告
+  if (playerIndex === -1) {
+    log.warn('no player:true tank in switchable, default to first', { count: switchable.length });
+    playerIndex = 0;
+  } else if (playerCount > 1) {
+    log.warn('multiple player:true tanks, using first marked', { count: playerCount, playerIndex });
+  }
+
+  log.info('tanks built', { count: tanks.length, switchable: switchable.length, playerIndex });
+  return { tanks, switchable, playerIndex };
 }
 
 /** 四周环形山(静态背景，fixed collider 防坦克穿出地形) */
@@ -247,7 +320,8 @@ function startLoop(
   shake: CameraShake,
   destruction: DestructionSystem,
   hud: HUD,
-): void {
+  director: DirectorSystem,
+): { stop: () => void } {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
 
@@ -255,8 +329,11 @@ function startLoop(
   let acc = 0;
   let frame = 0;
   let prevSwitchNext = false;
+  let rafId = 0;
+  let running = true;
 
   const loop = (): void => {
+    if (!running) return;
     const now = performance.now();
     let frameTime = (now - last) / 1000;
     last = now;
@@ -264,16 +341,18 @@ function startLoop(
 
     const state = input.state;
 
-    // Tab 边沿触发切换坦克
-    if (state.switchNext && !prevSwitchNext) {
+    // Tab 切换仅在调试模式生效;关闭时仅初始玩家坦克可操控
+    if (isDebug() && state.switchNext && !prevSwitchNext) {
       switcher.next();
     }
     prevSwitchNext = state.switchNext;
 
     const activeTank = switcher.activeTank;
+    hud.setCrosshair(input.state.mouseX, input.state.mouseY);
     hud.update(activeTank);
 
     controller.applyDrive(state);
+    director.updateDrive(frameTime); // NPC step 前:决策 + drive
     acc += frameTime;
     let steps = 0;
     while (acc >= dt && steps < maxSub) {
@@ -289,23 +368,27 @@ function startLoop(
     physics.eventQueue.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
       weapon.handleCollision(h1, h2);
+      director.handleCollision(h1, h2); // NPC 炮弹命中分发
       destruction.handleCollision(h1, h2);
     });
 
-    controller.aimAndCamera(state, frameTime);
+    controller.applyAim(state, frameTime);
+    controller.updateCamera();
     weapon.update(state, frameTime);
+    director.update(frameTime); // NPC step 后:aim + weapon
     shake.update(frameTime);
     destruction.update(frameTime);
 
     frame++;
-    if (frame % 30 === 0) {
+    // 周期诊断日志仅在调试模式输出(关闭时连计算都省)
+    if (isDebug() && frame % 30 === 0) {
       const t = activeTank.body.translation();
       const v = activeTank.body.linvel();
       const aim = controller.aimInfo;
       const w = weapon.stats;
       const d = destruction.stats;
       log.debug('diag', {
-        tank: activeTank.name,
+        tank: activeTank.displayName,
         pos: `${t.x.toFixed(1)},${t.y.toFixed(2)},${t.z.toFixed(1)}`,
         spd: Math.hypot(v.x, v.z).toFixed(2),
         turret: `${aim.turretDeg.toFixed(0)}°`,
@@ -319,10 +402,18 @@ function startLoop(
     }
 
     render.render();
-    requestAnimationFrame(loop);
+    rafId = requestAnimationFrame(loop);
   };
 
-  requestAnimationFrame(loop);
+  rafId = requestAnimationFrame(loop);
+
+  return {
+    stop: (): void => {
+      running = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      input.detach();
+    },
+  };
 }
 
 main().catch((e) => {

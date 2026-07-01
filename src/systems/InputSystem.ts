@@ -19,6 +19,9 @@ export interface InputState {
   barrelDir: number;
   fire: boolean;
   switchNext: boolean;
+  /** 鼠标在窗口客户区的像素坐标，供 HUD 准星使用 */
+  mouseX: number;
+  mouseY: number;
 }
 
 const BLOCKED_KEYS = new Set([
@@ -39,6 +42,8 @@ const BLOCKED_KEYS = new Set([
 export class InputSystem {
   private keys = new Set<string>();
   private attached = false;
+  private mouseX = 0;
+  private mouseY = 0;
 
   attach(): void {
     if (this.attached) {
@@ -48,6 +53,7 @@ export class InputSystem {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
+    window.addEventListener('mousemove', this.onMouseMove);
     this.attached = true;
     log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / Tab 切换坦克' });
   }
@@ -58,6 +64,7 @@ export class InputSystem {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('mousemove', this.onMouseMove);
     this.keys.clear();
     this.attached = false;
     log.debug('input detached');
@@ -71,6 +78,8 @@ export class InputSystem {
       barrelDir: (this.has('KeyA') ? 1 : 0) - (this.has('KeyS') ? 1 : 0),
       fire: this.has('Space'),
       switchNext: this.has('Tab'),
+      mouseX: this.mouseX,
+      mouseY: this.mouseY,
     };
   }
 
@@ -91,5 +100,10 @@ export class InputSystem {
   private onBlur = (): void => {
     this.keys.clear();
     log.debug('window blur, keys cleared');
+  };
+
+  private onMouseMove = (e: MouseEvent): void => {
+    this.mouseX = e.clientX;
+    this.mouseY = e.clientY;
   };
 }

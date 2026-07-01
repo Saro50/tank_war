@@ -79,9 +79,36 @@ export class RenderScene {
     this.renderer.render(this.scene, this.camera);
   }
 
-  /** 销毁渲染资源(场景重置/卸载用)：移除 resize 监听并释放 WebGL 上下文 */
+  /** 销毁渲染资源(场景重置/卸载用)：移除 resize 监听、释放场景对象并移除 canvas */
   dispose(): void {
     window.removeEventListener('resize', this.onResize);
+
+    // 释放场景图中所有 Mesh 的几何体、材质和纹理
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
+    const texs = new Set<THREE.Texture>();
+    this.scene.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (mesh.geometry) geos.add(mesh.geometry);
+      const m = mesh.material;
+      const collect = (mm: THREE.Material): void => {
+        mats.add(mm);
+        const map = (mm as { map?: THREE.Texture }).map;
+        if (map) texs.add(map);
+      };
+      if (Array.isArray(m)) for (const mm of m) collect(mm);
+      else if (m) collect(m);
+    });
+    for (const t of texs) t.dispose();
+    for (const m of mats) m.dispose();
+    for (const g of geos) g.dispose();
+
+    // 移除 renderer 创建的 canvas
+    const canvas = this.renderer.domElement;
+    if (canvas.parentElement) {
+      canvas.parentElement.removeChild(canvas);
+    }
     this.renderer.dispose();
   }
 }

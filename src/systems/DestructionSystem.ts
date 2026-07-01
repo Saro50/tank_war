@@ -69,13 +69,18 @@ interface House {
  * ============================================================
  * 管理两类可破坏物：
  *  1. Destructible 箱子 —— Voronoi 整体炸碎
- *  2. Brick 砖墙房子 —— 独立砖块预砌堆叠，爆炸后逐块受力脱落、
- *     上方砖块因失去支撑自然坍塌("逐渐碎开落地"由物理模拟自然产生)
+ *  2. Brick 砖墙房子 —— 独立砖块预砌(fixed 锁死)，受击时命中半径内的
+ *     砖块转 dynamic 飞溅脱落。
  *
- * 爆炸响应(onExplosion)：
+ * 静态物体统一原则：所有可破坏物(fixed)只有在被炮弹爆炸(onExplosion)
+ * 或坦克撞击(handleCollision)交互时，才由 applyDamage 转 dynamic。
+ * 避免"靠物理堆叠维持稳定"——rapier 里堆叠极易因微小重叠/积分误差
+ * 连锁抖动 → 整栋墙自动倒塌。
+ *
+ * 爆炸响应(onExplosion → applyDamage)：
  *  - 半径内箱子 → 触发 Voronoi 破碎
- *  - 半径内砖块 → 按距离衰减施加径向冲量(+上扰+随机扭矩)
- *    砖块默认 sleep，受力自动唤醒；坍塌时碰撞唤醒上方 sleep 砖块
+ *  - 半径内砖块 → fixed 转 dynamic + 按距离衰减施加径向冲量
+ *    (+上扰+随机扭矩)，只活化直接命中的砖块，远处砖块继续 fixed 稳固
  */
 export class DestructionSystem {
   private readonly physics: PhysicsWorld;
@@ -94,12 +99,12 @@ export class DestructionSystem {
   /** 房屋(结构 HP + 屋顶瓦块，HP 归零屋顶塌落) */
   private houses: House[] = [];
   private fragments: Fragment[] = [];
-  /** 当前活性坦克:撞击判定(读 handle/刚体速度) + 受击目标(takeHit) + update 推进冒烟。 */
-  private tankCollider = -1;
-  private tankBody?: RAPIER.RigidBody;
+  /** 当前玩家活性坦克:simulateStaticHit 定位用。撞击判定已改用 tankByCollider(任意坦克) */
   private activeTank?: IControllableTank;
   /** 所有可附身坦克（玩家+静态），用于统一 update */
   private controllableTanks: IControllableTank[] = [];
+  /** collider handle → 坦克 映射(handleCollision 任意坦克撞击判定,不再只认玩家) */
+  private readonly tankByCollider = new Map<number, IControllableTank>();
   /** 撞击冷却(秒)：连续碰撞不重复扣血，避免一帧多次 applyDamage */
   private ramCooldown = 0;
 
@@ -110,19 +115,19 @@ export class DestructionSystem {
   }
 
   /**
-   * 注册所有可附身坦克，用于统一 update。
+   * 注册所有可附身坦克,用于统一 update + 构建 collider→坦克 映射(撞击判定用)。
    */
   setControllableTanks(tanks: IControllableTank[]): void {
     this.controllableTanks = tanks;
+    this.tankByCollider.clear();
+    for (const t of tanks) this.tankByCollider.set(t.colliderHandle, t);
   }
 
   /**
-   * 注册当前活性坦克(撞击破坏判定 + 自身受击目标)。由 main 切换后调用。
-   * 同时记录 collider handle(撞别人判定)、刚体(读速度算撞击力)、坦克实例(被击+update)。
+   * 注册当前玩家活性坦克(simulateStaticHit 定位用)。由 main 切换后调用。
+   * 注:撞击破坏判定已改用 tankByCollider(任意坦克参与即触发),不再依赖单一活性坦克。
    */
   setActiveTank(tank: IControllableTank): void {
-    this.tankCollider = tank.colliderHandle;
-    this.tankBody = tank.body;
     this.activeTank = tank;
   }
 
@@ -163,10 +168,12 @@ export class DestructionSystem {
   }
 
   /**
-   * 创建砖墙房子(四面墙，砖块独立堆叠，错缝砌筑)
+   * 创建砖墙房子(四面墙，砖块各自 fixed 锁死、错缝砌筑)
+   * 砖块默认 fixed(不靠堆叠稳定，防自动倒塌)；受击时由 applyDamage 转 dynamic 飞溅。
    * @param center 房子中心(地面层 y)
    * @param house  {x:宽, y:高, z:深}
-   * @returns 砖块总数
+   * @returns 实际砖墙顶 y(center.y + rows*by)。砖块按 by 整数层堆叠，
+   *          house.y 非 by 整数倍时实际墙高 < house.y，屋顶须以此为准才不浮空。
    */
   addBrickHouse(
     center: { x: number; y: number; z: number },
@@ -210,7 +217,10 @@ export class DestructionSystem {
     }
 
     log.info('brick house built', { bricks: count, house });
-    return count;
+    // 实际墙顶：最后一层砖的上表面 = center.y + rows*by。
+    // rows*by 可能 < house.y(非整数倍)，屋顶(buildRoof)必须用此值而非 center.y+house.y，
+    // 否则屋顶底沿悬在墙顶之上 → 整栋屋顶浮空。
+    return center.y + rows * by;
   }
 
   /** 创建水泥塔楼(块状渐进破坏) */
@@ -253,8 +263,8 @@ export class DestructionSystem {
     center: { x: number; y: number; z: number },
     size: { x: number; y: number; z: number },
   ): void {
-    this.addBrickHouse(center, size);
-    const tiles = this.buildRoof(center, size);
+    const wallTopY = this.addBrickHouse(center, size); // 实际砖墙顶(防屋顶浮空)
+    const tiles = this.buildRoof(center, size, wallTopY);
     // 结构耐久按房屋体积标定(越大越抗揍)：6×5×6≈22HP, 5×4×5≈12HP
     const maxHp = Math.max(8, Math.round((size.x * size.y * size.z) / 8));
     this.houses.push({
@@ -263,7 +273,7 @@ export class DestructionSystem {
       centerZ: center.z,
       halfX: size.x / 2,
       halfZ: size.z / 2,
-      topY: center.y + size.y,
+      topY: wallTopY, // 爆炸命中判定的高度上界用实际墙顶，与屋顶/砖墙一致
       bottomY: center.y,
       hp: maxHp,
       maxHp,
@@ -288,13 +298,18 @@ export class DestructionSystem {
    * - 屋檐外延(eave)：瓦块四面超出墙体一截，遮雨遮阳(屋檐挑出是农家标志)
    * - 屋脊：顶部沿 z 轴的长条(可破坏)
    * 瓦块沿 z 分段，被爆炸活化掉落 = 破洞。
+   *
+   * @param wallTopY 砖墙实际顶 y(由 addBrickHouse 返回)。屋顶底沿贴合此值，
+   *                 不能用 center.y+size.y——砖块按 by 整数层堆，house.y 非
+   *                 整数倍时墙顶低于 size.y，用理论值会让整栋屋顶浮空。
    */
   private buildRoof(
     center: { x: number; y: number; z: number },
     size: { x: number; y: number; z: number },
+    wallTopY: number,
   ): { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[] {
     const cfg = CONFIG.destruction.house;
-    const top = center.y + size.y;
+    const top = wallTopY; // 屋顶底沿贴合砖墙实际顶(防浮空)
     const eave = cfg.eave;
     const halfSpan = size.x / 2 + eave; // 半跨度(含 x 方向屋檐)
     const fullZ = size.z + eave * 2; // z 方向也外延屋檐
@@ -406,7 +421,14 @@ export class DestructionSystem {
     return tiles;
   }
 
-  /** 创建单块砖(动态刚体 + 网格)，高摩擦防滑、高密度有重量感 */
+  /**
+   * 创建单块砖(fixed 刚体 + 网格)
+   * ------------------------------------------------------------
+   * 砖块默认 fixed 锁死，避免"靠物理堆叠维持稳定"——堆叠在 rapier 里
+   * 极易因初始微小重叠/积分误差连锁抖动 → 整栋墙自动倒塌。
+   * 与 Tree/Tower 同思路：未受击时纹丝不动，受击时由 applyDamage 转
+   * dynamic 飞溅。density/friction 保留，供转 dynamic 后的飞溅手感。
+   */
   private createBrick(
     x: number,
     y: number,
@@ -417,17 +439,14 @@ export class DestructionSystem {
     hz: number,
   ): void {
     const cfg = CONFIG.destruction.brick;
-    const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(x, y, z)
-      .setLinearDamping(0.05) // 低阻尼，让重力主导(不飘)
-      .setAngularDamping(0.1);
+    const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z);
     const body = this.physics.world.createRigidBody(bodyDesc);
     this.physics.world.createCollider(
       RAPIER.ColliderDesc.cuboid(hx, hy, hz)
-        .setDensity(cfg.density) // 重 → 有重量感
-        .setFriction(0.9) // 高摩擦 → 堆叠稳定、坍塌不滑
+        .setDensity(cfg.density) // 重 → 转 dynamic 后有重量感
+        .setFriction(0.9) // 高摩擦 → 飞溅落地不滑
         .setRestitution(0.0)
-        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), // 撞击破坏需要事件上报
+        .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS), // 坦克撞击需事件上报(handleCollision)
       body,
     );
     const mesh = new Mesh(geo, brickMat);
@@ -506,7 +525,10 @@ export class DestructionSystem {
       tanksHit++;
     }
 
-    // 砖块(距离衰减冲量 + 上扰 + 随机扭矩)
+    // 砖块(fixed → 命中半径内转 dynamic + 径向衰减冲量飞溅 + 上扰 + 随机扭矩)。
+    // 注意：砖块默认 fixed 锁死，必须先 setBodyType(Dynamic) 冲量才会生效，
+    // 否则 fixed 刚体对 applyImpulse 完全不响应(整墙打不动)。
+    // 这与炮弹/坦克两种交互一致：炮击靠 onExplosion，撞击靠 handleCollision，最终都走这里。
     const imp = CONFIG.destruction.brick.impulse;
     let bricksHit = 0;
     for (const b of this.bricks) {
@@ -516,11 +538,15 @@ export class DestructionSystem {
         dz = t.z - pos.z;
       const d2 = dx * dx + dy * dy + dz * dz;
       if (d2 >= r2) continue;
-      const dist = Math.sqrt(d2) || 0.01;
-      const falloff = 1 - dist / radius; // 中心 1 → 边缘 0
+      const dist = Math.sqrt(d2);
+      const falloff = 1 - Math.min(dist, radius) / radius; // 中心 1 → 边缘 0
       const mag = imp * falloff;
+      // 活化：fixed → dynamic，使其可受力、受重力影响(飞溅后自然落地)
+      b.body.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+      // 爆心正上方时纯垂直上冲，避免人为 0.01 导致的方向偏移
+      const dirScale = dist > 0.001 ? mag / dist : 0;
       b.body.applyImpulse(
-        { x: (dx / dist) * mag, y: (dy / dist) * mag + mag * 0.6, z: (dz / dist) * mag },
+        { x: dx * dirScale, y: dy * dirScale + mag * 0.6, z: dz * dirScale },
         true,
       );
       b.body.applyTorqueImpulse(
@@ -615,43 +641,44 @@ export class DestructionSystem {
   }
 
   /**
-   * 碰撞分发回调(main 统一 drain 调用)：坦克撞击可破坏物 → 与炮击一致的破坏。
+   * 碰撞分发回调(main 统一 drain 调用)：任意坦克撞击可破坏物 → 与炮击一致的破坏。
    * ------------------------------------------------------------
-   * 设计：撞击 = 以被撞物位置为爆心的小型 applyDamage，伤害按坦克速度缩放。
-   *   - 只有坦克参与碰撞才触发(地面/山体未开碰撞事件，不会进来)
-   *   - 被撞方任意可破坏物：树/栅栏/砖墙/塔/箱子/屋顶，统一走 applyDamage
-   *   - 速度低于阈值不计伤害(静止贴着不算撞)；冷却去重防一帧多次扣血
+   * 设计:撞击 = 以被撞物位置为爆心的小型 applyDamage,伤害按【撞击者】速度缩放。
+   *   - 任意 controllableTank(玩家或NPC)参与碰撞都触发(用 tankByCollider 反查)
+   *   - 被撞方任意可破坏物:树/栅栏/砖墙/塔/箱子/屋顶,统一走 applyDamage
+   *   - 速度低于阈值不计伤害(静止贴着不算撞);冷却去重防一帧多次扣血
+   *   - exclude 撞击者:撞击爆炸不伤自己
    * 与炮击完全共用 applyDamage → 撞击和炮击对每个可破坏物行为一致。
    */
   handleCollision(h1: number, h2: number): void {
-    if (this.tankCollider < 0 || !this.tankBody) return;
-    // 坦克必须参与这次碰撞
-    const tankInvolved = h1 === this.tankCollider || h2 === this.tankCollider;
-    if (!tankInvolved) return;
-    if (this.ramCooldown > 0) return; // 冷却期内忽略，防连续碰撞重复扣血
+    if (this.ramCooldown > 0) return; // 冷却期内忽略,防连续碰撞重复扣血
+    // 找参与碰撞的坦克(任意 controllableTank,不再只认玩家)
+    const tank = this.tankByCollider.get(h1) ?? this.tankByCollider.get(h2);
+    if (!tank || tank.state !== 'intact') return;
 
-    // 坦克水平速度(撞击力度来源)
-    const v = this.tankBody.linvel();
+    // 撞击者水平速度(撞击力度来源)——用撞击者而非玩家,修复 NPC 撞玩家误用玩家速度
+    const v = tank.body.linvel();
     const speed = Math.hypot(v.x, v.z);
-    const driveCfg = this.activeTank?.driveConfig;
-    const minSpeed = driveCfg?.dust.minSpeed ?? CONFIG.tank.dust.minSpeed; // 复用扬尘阈值：慢速/静止不造成破坏
+    const driveCfg = tank.driveConfig;
+    const minSpeed = driveCfg.dust.minSpeed; // 复用扬尘阈值:慢速/静止不造成破坏
     if (speed < minSpeed) return;
 
     // 取被撞物位置作爆心(另一方的刚体 translation)
-    const other = h1 === this.tankCollider ? h2 : h1;
+    const other = this.tankByCollider.has(h1) ? h2 : h1;
     const col = this.physics.world.getCollider(other);
     const hitBody = col.parent();
     if (!hitBody) return;
     const t = hitBody.translation();
 
-    // 伤害按速度缩放：满速(moveSpeed)≈ 炮击的 0.5 倍，慢速按比例衰减
-    const moveSpeed = driveCfg?.moveSpeed ?? CONFIG.tank.moveSpeed;
+    // 伤害按撞击者速度缩放:满速(moveSpeed)≈ 炮击的 0.5 倍,慢速按比例衰减
+    const moveSpeed = driveCfg.moveSpeed;
     const ramScale = 0.5 * Math.min(1, speed / moveSpeed);
     const damage = CONFIG.destruction.hitDamage * ramScale;
     // 撞击半径比爆炸小(贴身撞击)
     const radius = CONFIG.destruction.explosionRadius * 0.6;
     this.ramCooldown = 0.2; // 0.2s 冷却
-    this.applyDamage({ x: t.x, y: t.y, z: t.z }, radius, damage);
+    // exclude 撞击者:撞击爆炸不伤自己(否则玩家撞树会炸到自己)
+    this.applyDamage({ x: t.x, y: t.y, z: t.z }, radius, damage, tank);
   }
 
   /** 每帧更新碎片寿命/淡出(砖块由物理同步，不需更新) + 撞击冷却 + 所有可附身坦克冒烟 */

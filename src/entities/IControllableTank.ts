@@ -57,8 +57,14 @@ export interface IControllableTank {
   readonly muzzle: Object3D;
   readonly hullSway?: Group;
 
-  /** 显示名称，如 "T-14 03" / "Tiger 231" / "Abrams A11" */
+  /** 显示名称(型号名)，如 "T-14 03" / "Tiger 231" / "Abrams A11" */
   readonly name: string;
+
+  /** 实例唯一 ID(自增,从 1 开始)。区分同型号多辆,displayName 组合用 */
+  readonly id: number;
+
+  /** 展示名 = 型号名 + #id,如 "Tiger 231 #2"。HUD/日志统一用此避免重名 */
+  readonly displayName: string;
 
   state: 'intact' | 'destroyed';
 

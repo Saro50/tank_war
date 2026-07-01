@@ -24,6 +24,7 @@ import { Explosion } from '../effects/Explosion';
 import type { Damageable } from './Damageable';
 import type { Fragment } from './Destructible';
 import type { IControllableTank, DriveConfig } from './IControllableTank';
+import { nextTankId } from './TankId';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Tank');
@@ -76,6 +77,12 @@ export class Tank implements Damageable, IControllableTank {
   readonly barrel: Group;
   readonly muzzle: Object3D;
   readonly name = 'T-14 03';
+  /** 实例唯一 ID(自增,从 1 开始),区分同型号多辆 */
+  readonly id = nextTankId();
+  /** 展示名 = 型号 + #id,HUD/日志统一用此避免重名 */
+  get displayName(): string {
+    return `${this.name} #${this.id}`;
+  }
 
   private readonly leftTrackTex: CanvasTexture;
   private readonly rightTrackTex: CanvasTexture;
@@ -100,6 +107,8 @@ export class Tank implements Damageable, IControllableTank {
     physics: PhysicsWorld,
     render: RenderScene,
     spawn: { x: number; y: number; z: number },
+    /** 朝向角(弧度,绕 y)。0=面向 +z(炮管指 +z)。与 StaticTank 对齐,支持配置朝向 */
+    yaw = 0,
   ) {
     this.physics = physics;
     this.render = render;
@@ -110,8 +119,10 @@ export class Tank implements Damageable, IControllableTank {
     const bh = cfg.bodyHalf;
 
     // ---- 1. 物理车身(整体外框 cuboid) ----
+    // setRotation 设初始朝向;enabledRotations 锁 X/Z 只留 Y 轴旋转,初始 yaw 不被物理推翻
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(spawn.x, spawn.y, spawn.z)
+      .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) })
       .setLinearDamping(0.6)
       .setAngularDamping(2.5)
       .enabledRotations(false, true, false)

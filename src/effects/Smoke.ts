@@ -113,12 +113,15 @@ export class Smoke {
     });
   }
 
-  /** 销毁:清所有粒子(group 从父节点的移除由 owner 负责) */
+  /** 销毁:清所有粒子并从父节点移除 group */
   dispose(): void {
     for (const p of this.particles) {
       p.mat.dispose();
       this.group.remove(p.mesh);
     }
     this.particles.length = 0;
+    if (this.group.parent) {
+      this.group.parent.remove(this.group);
+    }
   }
 }

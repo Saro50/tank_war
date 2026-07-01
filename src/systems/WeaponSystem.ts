@@ -30,7 +30,7 @@ export class WeaponSystem {
   private readonly getActiveTank: () => IControllableTank;
   private readonly physics: PhysicsWorld;
   private readonly render: RenderScene;
-  private readonly shake: CameraShake;
+  private readonly shake: CameraShake | undefined;
   private readonly destruction: DestructionSystem;
 
   private projectiles: Projectile[] = [];
@@ -40,13 +40,15 @@ export class WeaponSystem {
 
   private cooldown = 0;
   private prevFire = false;
-  private recoilOffset = 0; // 炮管当前后缩量(负值，回弹到 0)
+  /** 每辆坦克独立的后坐量，避免切换坦克时串位 */
+  private recoilByTank = new Map<number, number>();
 
   constructor(
     getActiveTank: () => IControllableTank,
     physics: PhysicsWorld,
     render: RenderScene,
-    shake: CameraShake,
+    /** 相机震动(玩家开火震屏)。NPC 传 undefined:NPC 开火不震玩家相机 */
+    shake: CameraShake | undefined,
     destruction: DestructionSystem,
   ) {
     this.getActiveTank = getActiveTank;
@@ -113,8 +115,9 @@ export class WeaponSystem {
       z: pos.z + dir.z * 0.6,
     };
 
-    // 1. 生成炮弹
+    // 1. 生成炮弹(记录发射者,爆炸时 exclude 防自伤——友伤基础)
     const proj = new Projectile(this.physics, this.render, spawnPos, dir);
+    proj.ownerTank = tank;
     this.projectiles.push(proj);
     this.projByCollider.set(proj.colliderHandle, proj);
 
@@ -131,10 +134,10 @@ export class WeaponSystem {
     this.muzzleFlashes.push(new MuzzleFlash(this.render, pos, dir));
 
     // 4. 炮管后缩
-    this.recoilOffset = -cfg.recoil.barrelBack;
+    this.recoilByTank.set(tank.id, -cfg.recoil.barrelBack);
 
-    // 5. 相机震动
-    this.shake.add(0.8);
+    // 5. 相机震动(玩家开火;NPC weapon 无 shake,不震)
+    this.shake?.add(0.8);
 
     log.info('FIRE', {
       tank: tank.name,
@@ -146,30 +149,41 @@ export class WeaponSystem {
 
   private updateRecoil(tank: IControllableTank): void {
     const cfg = CONFIG.weapon.recoil;
-    this.recoilOffset = lerp(this.recoilOffset, 0, cfg.barrelRecoverLerp);
-    tank.barrel.position.z = tank.barrelBaseZ + this.recoilOffset;
+    let recoil = this.recoilByTank.get(tank.id) ?? 0;
+    recoil = lerp(recoil, 0, cfg.barrelRecoverLerp);
+    if (Math.abs(recoil) < 0.001) {
+      this.recoilByTank.delete(tank.id);
+      recoil = 0;
+    } else {
+      this.recoilByTank.set(tank.id, recoil);
+    }
+    tank.barrel.position.z = tank.barrelBaseZ + recoil;
   }
 
-  /** 引爆：alive 置 false，可选生成爆炸特效 */
-  private detonate(p: Projectile, explode: boolean, excludeTank?: IControllableTank): void {
+  /**
+   * 引爆：alive 置 false，可选生成爆炸特效。
+   * exclude 用炮弹记录的发射者(ownerTank)防自伤——这是友伤的基础:
+   * 爆炸伤害所有坦克(含同阵营),只跳过发射者本人。
+   */
+  private detonate(p: Projectile, explode: boolean): void {
     if (!p.alive) return;
     p.alive = false;
     if (explode) {
       const t = p.body.translation();
       this.explosions.push(new Explosion(this.render, t));
-      // 通知破坏系统：爆炸半径内的可破坏物触发破碎。
-      // 传入开火的坦克，防止自伤。
-      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius, excludeTank);
+      // 通知破坏系统:爆炸半径内可破坏物触发破碎。exclude 发射者防自伤。
+      this.destruction.onExplosion(t, CONFIG.destruction.explosionRadius, p.ownerTank);
       log.info('HIT', {
         at: `${t.x.toFixed(1)},${t.y.toFixed(1)},${t.z.toFixed(1)}`,
+        owner: p.ownerTank?.displayName ?? 'none',
       });
     }
   }
 
-  /** 碰撞分发回调(由 main 统一 drain 调用)：检测炮弹命中 → 引爆 */
+  /** 碰撞分发回调(由 main 统一 drain 调用)：检测炮弹命中 → 引爆。多实例各自管自己的炮弹 */
   handleCollision(h1: number, h2: number): void {
     const p = this.projByCollider.get(h1) ?? this.projByCollider.get(h2);
-    if (p && p.alive) this.detonate(p, true, this.getActiveTank());
+    if (p && p.alive) this.detonate(p, true);
   }
 
   private cleanupProjectiles(): void {

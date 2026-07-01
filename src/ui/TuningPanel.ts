@@ -53,11 +53,20 @@ export interface TuningDebugHooks {
 
 export class TuningPanel {
   private tankNameLabel?: HTMLDivElement;
+  private panel?: HTMLDivElement;
 
   constructor(hooks?: TuningDebugHooks) {
     this.restore();
     this.buildUI(hooks);
     log.info('tuning panel ready', { count: TUNABLES.length });
+  }
+
+  /** 移除 DOM，防止热重载/场景重置后面板叠加 */
+  dispose(): void {
+    if (this.panel && this.panel.parentElement) {
+      this.panel.parentElement.removeChild(this.panel);
+      this.panel = undefined;
+    }
   }
 
   /** 更新面板中显示的当前附身坦克名称 */
@@ -120,6 +129,7 @@ export class TuningPanel {
 
   private buildUI(hooks?: TuningDebugHooks): void {
     const panel = document.createElement('div');
+    this.panel = panel;
     Object.assign(panel.style, panelStyle);
 
     const header = document.createElement('div');

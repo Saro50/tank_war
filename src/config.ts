@@ -504,6 +504,66 @@ export const CONFIG = {
     },
   },
 
+  /** 调试模式总开关
+   * ------------------------------------------------------------
+   * 默认 false(发布纯净);URL 带 ?debug=1 时由 utils/debug.ts 运行时覆盖为 true。
+   *  开启:Tab 可在所有坦克间切换 + 调参面板显示 + 周期诊断日志输出。
+   *  关闭:仅初始玩家坦克(player:true)可操控,其余坦克只作可破坏静态目标存在。
+   * 用 config 默认值而非硬编码,便于将来整体改为 URL-only 或环境变量。 */
+  debug: {
+    enabled: false,
+  },
+
+  /** 场景坦克列表(列表精确配置)
+   * ------------------------------------------------------------
+   * main 启动时遍历此表生成全部坦克。增减/改型号/改位置只改此数组,不动代码。
+   *  - variant: 't14'(玩家型,dynamic 可驾驶) | 'tiger'/'abrams'(静态型,fixed 可附身)
+   *  - spawn:   出生位置; y 为【地面高度】(非车身中心),main 按 variant 自行抬高
+   *  - yaw:     朝向弧度(绕 y;0=面向 +z,炮管指 +z)
+   *  - player:  true = 玩家初始附身载具(应恰好一辆;缺失取首辆并警告,多辆取首辆标记的)
+   *  - team:    'player'(玩家阵营) | 'enemy'(敌对,NPC目标) | 缺省=中立靶子(NPC不主动攻)
+   *  - npc:     true = 由 NpcController 驱动(机械AI);DirectorSystem 接管 possess+巡逻
+   */
+  tanks: [
+    { variant: 't14', spawn: { x: 0, y: 0, z: -8 }, yaw: 0, player: true, team: 'player' },
+    // 静态展示坦克(可破坏靶子,team:neutral=NPC 不主动攻击)
+    { variant: 'tiger', spawn: { x: -8, y: 0, z: -30 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'abrams', spawn: { x: 8, y: 0, z: -30 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'tiger', spawn: { x: -8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
+    { variant: 'abrams', spawn: { x: 8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
+    // NPC 敌坦(首期1辆,team:enemy + npc:true)。DirectorSystem 启动时接管并分配巡逻
+    { variant: 'tiger', spawn: { x: 25, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true },
+  ],
+
+  /** NPC 机械AI参数(L3反射层 + FSM 用)。确定性,无 LLM */
+  npc: {
+    sightRange: 45, // 感知半径(m),范围内发现敌方
+    fireRange: 35, // 开火射程(进入此距离且有目标→ENGAGE)
+    aimTolerance: 0.06, // 瞄准收敛阈值(rad),炮塔朝向误差小于此→可开火
+    retreatHpRatio: 0.25, // 血量低于此比例→RETREAT
+    retreatMaxTime: 8, // retreat 持续超此秒数→强制脱离回 PATROL(无回血机制,避免无限后退)
+    scanInterval: 0.2, // 感知扫描频率(秒,不必每帧扫)
+    loseTargetTime: 3, // 目标脱离视野多久算"丢失"(秒,回到 PATROL)
+  },
+
+  /** 敌方阵营资源(DirectorSystem 管理,未来 LLM 导演分配这些资源调控节奏) */
+  enemyFaction: {
+    // 可生成点(DirectorSystem.spawnEnemy / 未来 LLM 调用)
+    spawnPoints: [
+      { x: 25, z: 0 },
+      { x: -25, z: 5 },
+      { x: 0, z: 28 },
+    ],
+    // 预定义巡逻区域(DirectorSystem.assignPatrol / LLM 调用;NPC 在 waypoints 间循环)
+    patrolAreas: [
+      { id: 'north', waypoints: [{ x: 18, z: 25 }, { x: -18, z: 22 }, { x: -22, z: 8 }] },
+      { id: 'east', waypoints: [{ x: 28, z: 10 }, { x: 30, z: -8 }, { x: 22, z: -18 }] },
+      { id: 'south', waypoints: [{ x: -18, z: -22 }, { x: 0, z: -18 }, { x: 16, z: -24 }] },
+    ],
+    maxConcurrent: 5, // 同场最大敌坦数(导演限流)
+    reserveVariants: ['tiger', 'abrams'], // 可生成的型号池
+  },
+
   /** 山(四周背景，静态不可破坏，环形围合村庄) */
   mountain: {
     ringRadius: 95, // 山环半径(贴地形边缘)

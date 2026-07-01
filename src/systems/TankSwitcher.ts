@@ -17,11 +17,19 @@ export class TankSwitcher {
 
   constructor(tanks: IControllableTank[], startIndex = 0) {
     this.tanks = tanks;
+    if (tanks.length === 0) {
+      log.error('TankSwitcher created with empty tank list');
+      this.activeIndex = 0;
+      return;
+    }
     this.activeIndex = this.clampAlive(startIndex);
-    log.info('switcher ready', { active: this.activeTank.name });
+    log.info('switcher ready', { active: this.activeTank.displayName });
   }
 
   get activeTank(): IControllableTank {
+    if (this.tanks.length === 0) {
+      throw new Error('TankSwitcher has no tanks');
+    }
     return this.tanks[this.activeIndex];
   }
 
@@ -40,7 +48,7 @@ export class TankSwitcher {
     const oldTank = this.activeTank;
     const newTank = this.tanks[index];
     this.activeIndex = index;
-    log.info('switch tank', { from: oldTank.name, to: newTank.name });
+    log.info('switch tank', { from: oldTank.displayName, to: newTank.displayName });
     this.onSwitch?.(newTank, oldTank);
   }
 

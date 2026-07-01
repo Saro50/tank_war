@@ -101,18 +101,18 @@ export class TankController {
   }
 
   /**
-   * step 后、sync 后调用：炮塔/炮管键盘积分 + 履带 + 相机。
-   * 被击毁后炮塔/炮管/履带/扬尘停转,仅保留相机跟随(看被毁残骸)。
+   * step 后、sync 后调用：炮塔/炮管键盘积分 + 履带 + 摇晃 + 扬尘。
+   * 不含相机——拆出 updateCamera(),供 AI 复用操控层但不碰玩家相机。
+   * 被击毁后炮塔/炮管/履带停转,仅回收残留扬尘淡出。
    */
-  aimAndCamera(input: InputState, dt: number): void {
+  applyAim(input: InputState, dt: number): void {
     const cfg = this.tank.driveConfig;
 
-    // 被击毁:跳过操控相关更新,仅回收残留扬尘淡出 + 相机继续跟随残骸
+    // 被击毁:跳过操控相关更新,仅回收残留扬尘淡出(相机由 updateCamera 独立跟随残骸)
     if (this.tank.state !== 'intact') {
       this.curLin = 0;
       this.curTurn = 0;
       this.updateDust(dt);
-      this.updateCamera();
       return;
     }
 
@@ -141,9 +141,7 @@ export class TankController {
 
     // 移动扬尘(C阶段)：按行驶距离在履带接地点生成尘雾
     this.updateDust(dt);
-
-    // 相机跟随
-    this.updateCamera();
+    // 不含相机:玩家侧由 main 调 updateCamera(),AI 侧不调
   }
 
   /**
@@ -206,8 +204,12 @@ export class TankController {
     }
   }
 
-  /** 第三人称相机：偏移随车身 yaw 旋转，始终在车尾后方看车头 */
-  private updateCamera(): void {
+  /**
+   * 第三人称相机：偏移随车身 yaw 旋转，始终在车尾后方看车头。
+   * 拆为 public:玩家侧 main 显式调用(每帧);AI 侧不调用(不抢玩家相机)。
+   * 被击毁也调用——跟随残骸。
+   */
+  updateCamera(): void {
     this.computeCamera(camPos);
     const cfg = this.tank.driveConfig.camera;
     this.camera.position.lerp(camPos, cfg.lerp);

@@ -28,6 +28,7 @@ import {
 import { Fragment } from './Destructible';
 import type { Damageable } from './Damageable';
 import type { IControllableTank, DriveConfig } from './IControllableTank';
+import { nextTankId } from './TankId';
 import { Smoke } from '../effects/Smoke';
 import { Explosion } from '../effects/Explosion';
 import { CONFIG } from '../config';
@@ -137,6 +138,12 @@ export class StaticTank implements Damageable, IControllableTank {
   readonly barrel: Group;
   readonly muzzle: Object3D;
   readonly name: string;
+  /** 实例唯一 ID(自增,从 1 开始),区分同型号多辆 */
+  readonly id = nextTankId();
+  /** 展示名 = 型号 + #id,HUD/日志统一用此避免重名 */
+  get displayName(): string {
+    return `${this.name} #${this.id}`;
+  }
   state: 'intact' | 'destroyed' = 'intact';
   private hp: number;
   private readonly startHp: number;
@@ -182,7 +189,7 @@ export class StaticTank implements Damageable, IControllableTank {
     const hh = cfg.hull;
     const bodyDesc = RAPIER.RigidBodyDesc.fixed()
       .setTranslation(spawn.x, spawn.y, spawn.z)
-      .setRotation({ x: 0, y: yaw, z: 0, w: 1 });
+      .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) });
     this.body = physics.world.createRigidBody(bodyDesc);
     // 碰撞体设置要点(修复击毁后悬空静止 BUG):
     // 1) setDensity:转 dynamic 时质量从碰撞体密度重算,无密度 → 质量 0 →
