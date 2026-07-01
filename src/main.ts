@@ -150,40 +150,41 @@ function buildGround(physics: PhysicsWorld, render: RenderScene): void {
 
 /** 布置村庄：房屋(砖墙+屋顶) + 水泥塔 + 栅栏 + 树 */
 function buildVillage(destruction: DestructionSystem): void {
-  // 房屋(4 栋，砖墙 + 人字屋顶可打破洞)
+  // 房屋(4 栋，地图扩大一倍后位置 ×2；房屋自身尺寸不变)
   const houses = [
-    { x: -16, z: 12, size: { x: 6, y: 5, z: 6 } },
-    { x: 14, z: 10, size: { x: 5, y: 4, z: 5 } },
-    { x: -10, z: -14, size: { x: 5, y: 4, z: 5 } },
-    { x: 20, z: -12, size: { x: 6, y: 5, z: 5 } },
+    { x: -32, z: 24, size: { x: 6, y: 5, z: 6 } },
+    { x: 28, z: 20, size: { x: 5, y: 4, z: 5 } },
+    { x: -20, z: -28, size: { x: 5, y: 4, z: 5 } },
+    { x: 40, z: -24, size: { x: 6, y: 5, z: 5 } },
   ];
   for (const h of houses) {
     destruction.addHouse({ x: h.x, y: 0, z: h.z }, h.size);
   }
 
-  // 水泥塔(2 座，弹坑式渐进破坏，村庄两侧)
-  destruction.addTower({ x: -30, y: 4, z: -2 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
-  destruction.addTower({ x: 32, y: 4, z: 4 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
+  // 水泥塔(2 座，弹坑式渐进破坏，村庄两侧；位置 ×2)
+  destruction.addTower({ x: -60, y: 4, z: -4 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
+  destruction.addTower({ x: 64, y: 4, z: 8 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
 
-  // 栅栏(几排，可被坦克推倒)
-  destruction.addFenceRow({ x: -6, z: 22 }, { x: 8, z: 22 }, 8);
-  destruction.addFenceRow({ x: -6, z: 26 }, { x: 8, z: 26 }, 8);
-  destruction.addFenceRow({ x: 26, z: -22 }, { x: 38, z: -22 }, 7);
+  // 栅栏(几排，可被坦克推倒；位置 ×2)
+  destruction.addFenceRow({ x: -12, z: 44 }, { x: 16, z: 44 }, 8);
+  destruction.addFenceRow({ x: -12, z: 52 }, { x: 16, z: 52 }, 8);
+  destruction.addFenceRow({ x: 52, z: -44 }, { x: 76, z: -44 }, 7);
 
   // 树(随机散布，避开楼房/塔/栅栏/坦克出生点)
   const occupied: { x: number; z: number; r: number }[] = [
     ...houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.size.x, h.size.z) })),
-    { x: -30, z: -2, r: 3.5 },
-    { x: 32, z: 4, r: 3.5 },
+    { x: -60, z: -4, r: 3.5 },
+    { x: 64, z: 8, r: 3.5 },
     // 坦克避让从 CONFIG.tanks 派生(而非硬编码):加坦克自动避让,无需同步两处(DRY)
     ...CONFIG.tanks.map((t) => ({ x: t.spawn.x, z: t.spawn.z, r: 4 })),
   ];
   let placed = 0;
   let tries = 0;
-  while (placed < 22 && tries < 300) {
+  // 地图扩大一倍,树木数量增至 40 棵,散布范围 ±120m
+  while (placed < 40 && tries < 600) {
     tries++;
-    const x = (Math.random() * 2 - 1) * 60;
-    const z = (Math.random() * 2 - 1) * 60;
+    const x = (Math.random() * 2 - 1) * 120;
+    const z = (Math.random() * 2 - 1) * 120;
     let ok = true;
     for (const o of occupied) {
       if (Math.hypot(x - o.x, z - o.z) < o.r + 2) {
