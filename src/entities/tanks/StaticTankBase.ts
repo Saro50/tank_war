@@ -36,7 +36,12 @@ import { TankBase, type TankSpec, type TankVisuals } from './TankBase';
  * 击毁后翻倒/炮塔炸飞/碎片飞溅。
  */
 export abstract class StaticTankBase extends TankBase {
-  protected abstract readonly variant: 'tiger' | 'abrams';
+  /**
+   * 型号标识。必须用 getter 而非字段——TankBase 构造在 super() 内调 getSpec()
+   * 读 variant,而子类字段初始化在 super() 之后,字段方案会读到 undefined。
+   * getter 是原型方法,构造期即可用。
+   */
+  protected abstract get variant(): 'tiger' | 'abrams';
 
   constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, yaw: number) {
     super(physics, render, spawn);

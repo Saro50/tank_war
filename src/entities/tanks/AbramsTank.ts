@@ -9,5 +9,7 @@ import { StaticTankBase } from './StaticTankBase';
  * 本类只声明 variant 字面量——所有逻辑下沉到 StaticTankBase/TankBase。
  */
 export class AbramsTank extends StaticTankBase {
-  protected readonly variant = 'abrams' as const;
+  protected get variant(): 'abrams' {
+    return 'abrams';
+  }
 }
