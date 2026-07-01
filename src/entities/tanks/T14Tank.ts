@@ -56,6 +56,8 @@ export class T14Tank extends TankBase {
         smokeThreshold: d.smokeThreshold,
         destroyExplosionScale: d.destroyExplosionScale,
         destroySmokeScale: d.destroySmokeScale,
+        regenDelay: d.regenDelay, // 脱战回血(玩家续战力,躲掩体脱战恢复)
+        regenRate: d.regenRate,
       },
       smokeOffset: { x: 0, y: 1.2, z: 0 },
     };

@@ -185,11 +185,7 @@ export class NpcController {
         return;
       }
       const dist = this.distTo(this.target);
-      const hasLOS = hasLineOfSight(
-        this.physics,
-        this.tank.body.translation(),
-        this.target.body.translation(),
-      );
+      const hasLOS = hasLineOfSight(this.physics, this.tank, this.target);
       // 在射程且有视线 → ENGAGE;否则 APPROACH
       this.state = dist <= cfg.fireRange && hasLOS ? 'engage' : 'approach';
     } else {
@@ -312,7 +308,7 @@ export class NpcController {
   /** 开火脉冲:冷却到 + 瞄准收敛 + 有视线 → true 一帧(触发 WeaponSystem 边沿) */
   private decideFire(aligned: boolean): boolean {
     if (this.fireCooldown > 0 || !aligned || !this.target) return false;
-    if (!hasLineOfSight(this.physics, this.tank.body.translation(), this.target.body.translation())) return false;
+    if (!hasLineOfSight(this.physics, this.tank, this.target)) return false;
     this.fireCooldown = CONFIG.weapon.fireCooldown; // 与武器冷却同步,防止持续触发
     return true;
   }

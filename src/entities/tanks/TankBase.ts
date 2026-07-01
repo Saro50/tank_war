@@ -37,6 +37,10 @@ export interface TankSpec {
     smokeThreshold: number;
     destroyExplosionScale: number;
     destroySmokeScale: number;
+    /** 脱战回血:最后一次受击后多少秒开始回血(可选,不设=不回血)。1VN 续战力 */
+    regenDelay?: number;
+    /** 回血速率(HP/秒) */
+    regenRate?: number;
   };
   smokeOffset: { x: number; y: number; z: number };
 }
@@ -80,6 +84,8 @@ export abstract class TankBase implements IControllableTank {
 
   private hp: number;
   private readonly startHp: number;
+  /** 最后受击时刻(performance.now 毫秒),脱战回血计时基准 */
+  private lastHitTime = 0;
   private smoke?: Smoke;
   private readonly explosions: Explosion[] = [];
   protected turretBody?: RAPIER.RigidBody;
@@ -211,6 +217,7 @@ export abstract class TankBase implements IControllableTank {
   takeHit(epicenter: { x: number; y: number; z: number }, damage: number): Fragment[] {
     if (this.state !== 'intact') return [];
     this.hp -= damage;
+    this.lastHitTime = performance.now(); // 记录受击时刻,脱战回血计时基准
     const ratio = this.hp / this.startHp;
     if (ratio <= this.spec.damage.smokeThreshold) {
       this.ensureSmoke();
@@ -270,8 +277,19 @@ export abstract class TankBase implements IControllableTank {
     });
   }
 
-  /** 每帧更新：烟 + 击毁爆炸粒子 */
+  /** 每帧更新：脱战回血 + 烟 + 击毁爆炸粒子 */
   update(dt: number): void {
+    // 脱战回血:最后受击超 regenDelay 秒后,按 regenRate 缓慢回血(仅 intact 且未满血)
+    const reg = this.spec.damage;
+    if (
+      reg.regenDelay !== undefined &&
+      reg.regenRate !== undefined &&
+      this.state === 'intact' &&
+      this.hp < this.startHp &&
+      performance.now() - this.lastHitTime > reg.regenDelay * 1000
+    ) {
+      this.hp = Math.min(this.startHp, this.hp + reg.regenRate * dt);
+    }
     if (this.smoke) this.smoke.update(dt);
     for (let i = this.explosions.length - 1; i >= 0; i--) {
       const e = this.explosions[i];

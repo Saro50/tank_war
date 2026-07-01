@@ -237,6 +237,10 @@ export const CONFIG = {
       destroyExplosionScale: 4,
       /** 击毁浓烟尺寸缩放(相对受伤小烟),同静态坦克 destroySmokeScale */
       destroySmokeScale: 1.6,
+      /** 脱战回血:最后一次受击后多少秒开始回血(1VN 续战力,躲掩体脱战可恢复) */
+      regenDelay: 8,
+      /** 回血速率(HP/秒),regenDelay 到期后每秒回血量 */
+      regenRate: 5,
     },
   },
 
@@ -314,6 +318,13 @@ export const CONFIG = {
   },
   /** 直接命中伤害(按距离衰减)：箱子 hp=1 一击碎，塔楼 hp=100 需多击 */
   hitDamage: 35,
+  /** 装甲方向性伤害(所有坦克生效):侧/背命中伤害更高,鼓励绕侧偷袭。
+   *  按爆心相对坦克朝向的点积判定:dot>cosThreshold 为正面(×1),<-cosThreshold 为背面,中间为侧面。 */
+  armor: {
+    sideMultiplier: 1.5, // 侧面命中伤害倍率(绕侧奖励)
+    backMultiplier: 2.0, // 背面命中伤害倍率(绕背奖励更高)
+    cosThreshold: 0.5, // 前/后判定阈值(cos60°)
+  },
   /** 水泥塔楼(弹坑式渐进破坏：每炮在弹着点表面崩落一小片碎渣，累积过多倒塌) */
   tower: {
     /** 三轴切块数(总块数 = gridX×gridY×gridZ)；块越小 → 弹坑越细腻、越不像砖头飞溅 */

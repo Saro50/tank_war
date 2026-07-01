@@ -520,7 +520,8 @@ export class DestructionSystem {
       if (d2 >= r2) continue;
       const dist = Math.sqrt(d2);
       const falloff = 1 - dist / radius;
-      const frags = tank.takeHit(pos, damage * falloff);
+      const mult = this.armorMultiplier(tank, pos); // 侧/背命中加伤(所有坦克)
+      const frags = tank.takeHit(pos, damage * falloff * mult);
       this.fragments.push(...frags);
       tanksHit++;
     }
@@ -690,6 +691,32 @@ export class DestructionSystem {
       return false;
     });
     for (const t of this.controllableTanks) t.update(dt);
+  }
+
+  /**
+   * 根据着弹点相对坦克的方向计算伤害倍率(方位装甲)
+   * ------------------------------------------------------------
+   * 以坦克朝向为基准:
+   *  - 正面(±45°)  : 1.0x — 正面装甲最厚
+   *  - 侧面(45°~135°): 1.5x — 侧击加伤,鼓励绕侧
+   *  - 背面(135°~180°): 2.0x — 背击最大伤害,奖励包抄
+   */
+  private armorMultiplier(tank: IControllableTank, epicenter: { x: number; y: number; z: number }): number {
+    const cfg = CONFIG.destruction.armor;
+    const q = tank.body.rotation();
+    // 从四元数计算车身偏航角
+    const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+    const dx = epicenter.x - tank.body.translation().x;
+    const dz = epicenter.z - tank.body.translation().z;
+    // 将冲击方向转到坦克局部坐标系
+    const localAngle = Math.atan2(
+      -dx * Math.cos(yaw) - dz * Math.sin(yaw),
+      -dx * Math.sin(yaw) + dz * Math.cos(yaw),
+    );
+    const absAngle = Math.abs(localAngle);
+    if (absAngle < Math.PI / 4) return 1.0;                    // 正面(装甲最厚)
+    if (absAngle < Math.PI * 3 / 4) return cfg.sideMultiplier; // 侧面
+    return cfg.backMultiplier;                                  // 背面
   }
 
   /** 诊断 */

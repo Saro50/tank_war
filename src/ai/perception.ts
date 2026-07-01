@@ -1,3 +1,4 @@
+import RAPIER from '@dimforge/rapier3d-compat';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 
@@ -37,14 +38,31 @@ export function findNearestEnemy(
 }
 
 /**
- * 视线检测:from 到 to 是否被遮挡。
- * 首期占位恒 true(无遮挡)——预留接口,后续接入 rapier castRay + collider
- * predicate 判断中间障碍(墙/山/树)。届时只改本函数体,NpcController 不动。
+ * 视线检测:observer 到 target 之间是否有障碍(建筑/树/山/坦克)遮挡。
+ * ------------------------------------------------------------
+ * 从观察者炮塔中部(y=1.5)水平射射线,命中中间 collider(toi < 距离-容差)
+ * 即视为遮挡。排除观察者自身 body 防自射;目标 body 命中在终点附近
+ * (toi≈距离)不算挡。
+ *
+ * 用于:NPC engage 判定/开火时机(不透视打墙后目标);
+ *       配合玩家躲建筑后脱战回血(NPC 看不见就不打)。
  */
 export function hasLineOfSight(
-  _physics: PhysicsWorld,
-  _from: { x: number; y: number; z: number },
-  _to: { x: number; y: number; z: number },
+  physics: PhysicsWorld,
+  observer: IControllableTank,
+  target: IControllableTank,
 ): boolean {
-  return true;
+  const from = observer.body.translation();
+  const to = target.body.translation();
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const hDist = Math.hypot(dx, dz);
+  if (hDist < 0.5) return true; // 太近视为可见(避免除零/自身重叠)
+  const dir = { x: dx / hDist, y: 0, z: dz / hDist }; // 水平单位向量
+  // 射线起点抬高到炮塔中部,避免贴地误判地面 collider
+  const origin = { x: from.x, y: 1.5, z: from.z };
+  const ray = new RAPIER.Ray(origin, dir);
+  // 排除观察者自身 body;命中 toi < hDist-0.5 视为中间有障碍
+  const hit = physics.world.castRay(ray, hDist, true, undefined, undefined, undefined, observer.body);
+  return hit === null || hit.timeOfImpact >= hDist - 0.5;
 }
