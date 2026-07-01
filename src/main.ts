@@ -4,8 +4,8 @@ import { CONFIG } from './config';
 import { PhysicsWorld } from './core/PhysicsWorld';
 import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
-import { Tank } from './entities/Tank';
-import { StaticTank } from './entities/StaticTank';
+import { createTank } from './entities/tanks/registry';
+import { StaticTankBase } from './entities/tanks/StaticTankBase';
 import type { IControllableTank } from './entities/IControllableTank';
 import { InputSystem } from './systems/InputSystem';
 import { TankController } from './systems/TankController';
@@ -202,16 +202,16 @@ function buildVillage(destruction: DestructionSystem): void {
 /**
  * 按配置列表生成全部坦克
  * ------------------------------------------------------------
- * 遍历 CONFIG.tanks,按 variant 分发创建:
- *  - 't14'            → Tank(玩家型 dynamic 可驾驶);spawn.y 是地面,需抬高到车身中心
- *  - 'tiger'/'abrams' → StaticTank(静态型 fixed 可附身);注册到 destruction 作可破坏目标
+ * 遍历 CONFIG.tanks,用 createTank(variant) 工厂分发创建具体子类:
+ *  - 't14'            → T14Tank(玩家型 dynamic 可驾驶)
+ *  - 'tiger'/'abrams' → TigerTank/AbramsTank(静态型 fixed 可附身)
+ * StaticTankBase 子类注册到 destruction 作可破坏目标。
  * 返回:
  *  - tanks:       全部坦克(含NPC) → 给 destruction(受击)/director(接管NPC)
  *  - switchable:  非NPC坦克      → 给 switcher(玩家 Tab 只切到这些,避免附身敌方双重控制)
  *  - playerIndex: 玩家初始在 switchable 中的索引
  *
- * 配置 spawn.y 统一为【地面高度】,两种坦克的抬高举内化在此,
- * 配置者无需关心各型号车身几何差异。
+ * 配置 spawn.y 统一为【地面高度】,各子类构造内部按需抬高(createTank/buildTanks 不关心)。
  */
 function buildTanks(
   physics: PhysicsWorld,
@@ -222,32 +222,19 @@ function buildTanks(
   const switchable: IControllableTank[] = [];
   let playerIndex = -1;
   let playerCount = 0;
-  const bh = CONFIG.tank.bodyHalf;
 
   for (let i = 0; i < CONFIG.tanks.length; i++) {
     const cfg = CONFIG.tanks[i];
     let tank: IControllableTank;
-    if (cfg.variant === 't14') {
-      // Tank.spawn.y = 车身中心高度;配置给的是地面 y,抬高 bh.y + 0.1 离地间隙
-      tank = new Tank(
-        physics,
-        render,
-        { x: cfg.spawn.x, y: cfg.spawn.y + bh.y + 0.1, z: cfg.spawn.z },
-        cfg.yaw,
-      );
-    } else if (cfg.variant === 'tiger' || cfg.variant === 'abrams') {
-      // StaticTank.spawn.y 即地面 y(内部用 collider setTranslation 抬高到中心)
-      const st = new StaticTank(physics, render, cfg.spawn, cfg.yaw, cfg.variant);
-      destruction.addStaticTank(st);
-      tank = st;
-    } else {
-      // 未知型号:as const 下理论不可达,运行期兜底(永不静默失败)
-      log.error('unknown tank variant, skipped', {
-        variant: (cfg as { variant: string }).variant,
-        index: i,
-      });
+    try {
+      tank = createTank(cfg.variant, physics, render, cfg.spawn, cfg.yaw);
+    } catch (e) {
+      // 未知 variant:as const 下编译期不可达,运行期兜底(永不静默失败)
+      log.error('unknown tank variant, skipped', { variant: cfg.variant, index: i, err: String(e) });
       continue;
     }
+    // 静态型号(tiger/abrams,StaticTankBase 子类)注册为可破坏目标
+    if (tank instanceof StaticTankBase) destruction.addStaticTank(tank);
     tanks.push(tank);
     // npc:true 不进 switchable:玩家 Tab 不可附身敌方,避免与 NpcController 双重控制冲突
     const isNpc = (cfg as { npc?: boolean }).npc === true;

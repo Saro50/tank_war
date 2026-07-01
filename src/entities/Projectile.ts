@@ -67,6 +67,11 @@ export class Projectile {
 
     this.mesh = new Mesh(sphereGeo, sphereMat);
     this.mesh.castShadow = true;
+    // 先同步到刚体位姿，避免创建帧显示在原点(0,0,0)导致"幽灵炮弹"视觉
+    const t = this.body.translation();
+    const r = this.body.rotation();
+    this.mesh.position.set(t.x, t.y, t.z);
+    this.mesh.quaternion.set(r.x, r.y, r.z, r.w);
     render.scene.add(this.mesh);
     SyncBridge.bind(this.body, this.mesh);
   }

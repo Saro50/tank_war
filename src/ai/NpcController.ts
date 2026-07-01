@@ -1,3 +1,4 @@
+import RAPIER from '@dimforge/rapier3d-compat';
 import { CONFIG } from '../config';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
@@ -316,7 +317,10 @@ export class NpcController {
     return true;
   }
 
-  /** 朝目标点转向;返回是否到达(tolerance 内)。设置 this.lastTurn */
+  /**
+   * 朝目标点转向;返回是否到达(tolerance 内)。设置 this.lastTurn。
+   * 含前向避障:steerTo 算目标转向后,若正前方有障则覆盖到通畅侧(预测式绕障)。
+   */
   private driveToward(target: { x: number; z: number }, tolerance: number): boolean {
     const sp = this.tank.body.translation();
     const dx = target.x - sp.x;
@@ -327,13 +331,17 @@ export class NpcController {
       return true;
     }
     this.lastTurn = this.steerTo(dx, dz);
+    const avoid = this.avoidanceTurn();
+    if (avoid !== 0) this.lastTurn = avoid; // 前方有障→覆盖转向到通畅侧
     return false;
   }
 
-  /** 远离目标点:朝反方向转向 */
+  /** 远离目标点:朝反方向转向(含前向避障,后撤时不撞身后障碍) */
   private driveAwayFrom(target: { x: number; z: number }): void {
     const sp = this.tank.body.translation();
     this.lastTurn = this.steerTo(sp.x - target.x, sp.z - target.z);
+    const avoid = this.avoidanceTurn();
+    if (avoid !== 0) this.lastTurn = avoid;
   }
 
   /** 算车身转向输入(-1..1):让车身朝 (dx,dz) 方向。基于车身当前 yaw 与目标方位差 */
@@ -366,5 +374,49 @@ export class NpcController {
   private get bodyYaw(): number {
     const q = this.tank.body.rotation();
     return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+  }
+
+  // ============================================================
+  // 前向避障(预测式射线)
+  // ============================================================
+
+  /**
+   * 前向扇形射线避障:返回修正转向(-1..1),0=前方通畅无需修正。
+   * 从车身向[左前/正前/右前]射 3 条射线(长度 avoidanceRange):
+   *  - 正前方通畅 → 不干预(交还 steerTo 朝目标)
+   *  - 正前方挡、某侧通畅 → 朝通畅侧偏转
+   *  - 两侧都通 → 朝目标所在侧(lastTurn 符号)偏转
+   *  - 三方都挡(死角) → 强转一侧,配合 checkStuck 兜底后退脱困
+   * 在 driveToward/driveAwayFrom 内调用,覆盖 lastTurn。与 checkStuck(反应式)互补。
+   */
+  private avoidanceTurn(): number {
+    const cfg = CONFIG.npc;
+    const yaw = this.bodyYaw;
+    const dist = cfg.avoidanceRange;
+    const ang = cfg.avoidanceAngle;
+    const o = this.tank.body.translation();
+    // 射线起点抬高到车身中部(y=1),避免贴地误判地面 collider
+    const origin = { x: o.x, y: 1.0, z: o.z };
+    if (this.rayClear(origin, yaw, dist)) return 0; // 正前方通,不干预
+    const leftClear = this.rayClear(origin, yaw - ang, dist);
+    const rightClear = this.rayClear(origin, yaw + ang, dist);
+    if (leftClear && !rightClear) return -1; // 仅左通→偏左
+    if (rightClear && !leftClear) return 1; // 仅右通→偏右
+    if (leftClear && rightClear) return this.lastTurn >= 0 ? 1 : -1; // 两侧通→朝目标侧
+    return -1; // 死角:强转,配合 checkStuck 后退
+  }
+
+  /**
+   * 射线探测:从 origin 沿 yaw 方向(0=+z)射 maxDist,返回是否通畅(无障碍命中)。
+   * 排除自身刚体防自射;命中任何 collider(建筑/树/山/坦克)在 maxDist 内即视为挡。
+   */
+  private rayClear(origin: { x: number; y: number; z: number }, yaw: number, maxDist: number): boolean {
+    const dir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) }; // 0=+z 单位向量(水平)
+    const ray = new RAPIER.Ray(origin, dir);
+    // castRay 返回命中 toi(沿 dir 距离,dir 单位故=实际距离);null=未命中=通畅
+    const toi = this.physics.world.castRay(
+      ray, maxDist, true, undefined, undefined, undefined, this.tank.body,
+    );
+    return toi === null;
   }
 }

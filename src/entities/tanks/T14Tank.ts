@@ -30,8 +30,18 @@ import {
  * 车体悬挂摇晃、战术编号贴花。
  */
 export class T14Tank extends TankBase {
-  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }) {
-    super(physics, render, spawn);
+  constructor(
+    physics: PhysicsWorld,
+    render: RenderScene,
+    spawn: { x: number; y: number; z: number },
+    /** 朝向角(弧度,绕 y)。0=面向 +z。与 StaticTankBase 对齐,支持配置朝向 */
+    yaw = 0,
+  ) {
+    // T-14 是 dynamic,collider 在 body 中心(无 offset);配置 spawn.y 是地面,抬高到车身中心
+    const bh = CONFIG.tank.bodyHalf;
+    super(physics, render, { x: spawn.x, y: spawn.y + bh.y + 0.1, z: spawn.z });
+    // setRotation 设初始朝向;enabledRotations 锁 X/Z 只留 Y,初始 yaw 不被物理推翻
+    this.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
   }
 
   protected getSpec(): TankSpec {

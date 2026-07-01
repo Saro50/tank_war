@@ -8,7 +8,7 @@ import { Destructible, Fragment } from '../entities/Destructible';
 import { Tower } from '../entities/Tower';
 import { Tree } from '../entities/Tree';
 import { FencePost } from '../entities/FencePost';
-import { StaticTank } from '../entities/StaticTank';
+import { StaticTankBase } from '../entities/tanks/StaticTankBase';
 import type { IControllableTank } from '../entities/IControllableTank';
 import { Logger } from '../utils/Logger';
 
@@ -93,7 +93,7 @@ export class DestructionSystem {
   private fences: FencePost[] = [];
   private readonly fenceByCollider = new Map<number, FencePost>();
   /** 静态展示坦克(可破坏目标：HP 归零被炸翻) */
-  private staticTanks: StaticTank[] = [];
+  private staticTanks: StaticTankBase[] = [];
   /** 屋顶瓦块(被爆炸活化掉落 = 破洞) */
   private roofTiles: { body: RAPIER.RigidBody; mesh: Mesh; alive: boolean }[] = [];
   /** 房屋(结构 HP + 屋顶瓦块，HP 归零屋顶塌落) */
@@ -138,7 +138,7 @@ export class DestructionSystem {
   simulateStaticHit(): void {
     if (!this.activeTank) return;
     const activePos = this.activeTank.body.translation();
-    let nearest: StaticTank | undefined;
+    let nearest: StaticTankBase | undefined;
     let nearestD2 = Infinity;
     for (const st of this.staticTanks) {
       if (st.state !== 'intact' || st === this.activeTank) continue;
@@ -282,12 +282,12 @@ export class DestructionSystem {
   }
 
   /** 注册静态展示坦克(可破坏目标),由 main 创建后调用 */
-  addStaticTank(tank: StaticTank): void {
+  addStaticTank(tank: StaticTankBase): void {
     this.staticTanks.push(tank);
   }
 
   /** 获取已注册的静态展示坦克列表(用于构建可附身列表) */
-  getStaticTanks(): StaticTank[] {
+  getStaticTanks(): StaticTankBase[] {
     return this.staticTanks;
   }
 

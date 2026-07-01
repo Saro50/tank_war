@@ -531,8 +531,11 @@ export const CONFIG = {
     { variant: 'abrams', spawn: { x: 8, y: 0, z: -30 }, yaw: 0, player: false, team: 'neutral' },
     { variant: 'tiger', spawn: { x: -8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
     { variant: 'abrams', spawn: { x: 8, y: 0, z: 30 }, yaw: 0, player: false, team: 'neutral' },
-    // NPC 敌坦(首期1辆,team:enemy + npc:true)。DirectorSystem 启动时接管并分配巡逻
+    // NPC 敌坦(team:enemy + npc:true)。DirectorSystem 启动时接管,轮询分配巡逻区域。
+    // 多辆分布东/西/北三个生成点(enemyFaction.spawnPoints),对应 east/north/south 巡逻区,避免挤一起
     { variant: 'tiger', spawn: { x: 25, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'abrams', spawn: { x: -25, y: 0, z: 5 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'tiger', spawn: { x: 0, y: 0, z: 28 }, yaw: 0, player: false, team: 'enemy', npc: true },
   ],
 
   /** NPC 机械AI参数(L3反射层 + FSM 用)。确定性,无 LLM */
@@ -544,6 +547,8 @@ export const CONFIG = {
     retreatMaxTime: 8, // retreat 持续超此秒数→强制脱离回 PATROL(无回血机制,避免无限后退)
     scanInterval: 0.2, // 感知扫描频率(秒,不必每帧扫)
     loseTargetTime: 3, // 目标脱离视野多久算"丢失"(秒,回到 PATROL)
+    avoidanceRange: 6, // 前向避障射线安全距离(m),≈ moveSpeed×反应时间,够提前转向
+    avoidanceAngle: 0.5, // 前向扇形半角(rad,≈28°),左前/右前射线偏角
   },
 
   /** 敌方阵营资源(DirectorSystem 管理,未来 LLM 导演分配这些资源调控节奏) */
