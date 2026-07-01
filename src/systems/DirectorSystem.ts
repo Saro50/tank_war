@@ -5,7 +5,8 @@ import type { RenderScene } from '../core/RenderScene';
 import { TankController } from './TankController';
 import { WeaponSystem } from './WeaponSystem';
 import type { DestructionSystem } from './DestructionSystem';
-import { NpcController, type NpcMission } from '../ai/NpcController';
+import { NpcController, type NpcMission, resolveNpcProfile } from '../ai/NpcController';
+import type { ResupplySystem } from './ResupplySystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Director');
@@ -45,6 +46,8 @@ export class DirectorSystem {
     private readonly render: RenderScene,
     private readonly destruction: DestructionSystem,
     private readonly allTanks: IControllableTank[],
+    /** 补给系统:NPC 弹药耗尽时导航补给;NPC 创建时注册其 (tank,weapon) 供装填 */
+    private readonly resupply: ResupplySystem,
   ) {
     // 从 CONFIG.tanks 派生阵营(与 allTanks 同序;buildTanks 保证顺序一致)
     this.teams = CONFIG.tanks.map((t) => t.team ?? 'neutral');
@@ -64,10 +67,14 @@ export class DirectorSystem {
       const controller = new TankController(tank, this.render);
       // 每 NPC 独立的武器(shake=undefined:NPC 开火不震玩家相机)
       const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
-      const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics);
+      // 按档位(tier)解析难度参数注入;缺失回退 regular(老兵)
+      const profile = resolveNpcProfile((cfg as { tier?: string }).tier);
+      const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply);
       npc.setMission(this.pickPatrolMission());
       this.npcs.push(npc);
       this.npcWeapons.push(weapon);
+      // 注册到补给系统:NPC 弹药耗尽时导航补给,驶入补给点时自动装填
+      this.resupply.register(tank, weapon);
     }
     log.info('director ready', { npcs: this.npcs.length });
   }

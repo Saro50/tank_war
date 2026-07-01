@@ -8,6 +8,7 @@ import { Destructible, Fragment } from '../entities/Destructible';
 import { Tower } from '../entities/Tower';
 import { Tree } from '../entities/Tree';
 import { FencePost } from '../entities/FencePost';
+import { ResupplyPoint } from '../entities/ResupplyPoint';
 import { StaticTankBase } from '../entities/tanks/StaticTankBase';
 import type { IControllableTank } from '../entities/IControllableTank';
 import { Logger } from '../utils/Logger';
@@ -92,6 +93,8 @@ export class DestructionSystem {
   private readonly treeByCollider = new Map<number, Tree>();
   private fences: FencePost[] = [];
   private readonly fenceByCollider = new Map<number, FencePost>();
+  /** 补给点(可被摧毁/再生,实现 Damageable),applyDamage 伤害链统一遍历 */
+  private resupplyPoints: ResupplyPoint[] = [];
   /** 静态展示坦克(可破坏目标：HP 归零被炸翻) */
   private staticTanks: StaticTankBase[] = [];
   /** 屋顶瓦块(被爆炸活化掉落 = 破洞) */
@@ -284,6 +287,11 @@ export class DestructionSystem {
   /** 注册静态展示坦克(可破坏目标),由 main 创建后调用 */
   addStaticTank(tank: StaticTankBase): void {
     this.staticTanks.push(tank);
+  }
+
+  /** 注册补给点(可被摧毁/再生),融入 applyDamage 伤害链 */
+  addResupplyPoint(rp: ResupplyPoint): void {
+    this.resupplyPoints.push(rp);
   }
 
   /** 获取已注册的静态展示坦克列表(用于构建可附身列表) */
@@ -526,6 +534,22 @@ export class DestructionSystem {
       tanksHit++;
     }
 
+    // 补给点(可被摧毁:HP 机制,按距离衰减扣血;摧毁后由 ResupplyPoint 自身状态机倒计时再生)
+    let resupplyHit = 0;
+    for (const rp of this.resupplyPoints) {
+      if (rp.state !== 'intact') continue;
+      const t = rp.body.translation();
+      const dx = t.x - pos.x,
+        dy = t.y - pos.y,
+        dz = t.z - pos.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= r2) continue;
+      const dist = Math.sqrt(d2);
+      const falloff = 1 - dist / radius;
+      rp.takeHit(pos, damage * falloff);
+      resupplyHit++;
+    }
+
     // 砖块(fixed → 命中半径内转 dynamic + 径向衰减冲量飞溅 + 上扰 + 随机扭矩)。
     // 注意：砖块默认 fixed 锁死，必须先 setBodyType(Dynamic) 冲量才会生效，
     // 否则 fixed 刚体对 applyImpulse 完全不响应(整墙打不动)。
@@ -636,8 +660,8 @@ export class DestructionSystem {
       }
     }
 
-    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || fencesHit > 0 || tanksHit > 0 || roofHit > 0 || roofsCollapsed > 0) {
-      log.info('damage', { destroyed, bricksHit, towersHit, treesHit, fencesHit, tanksHit, roofHit, roofsCollapsed, radius, damage: damage.toFixed(1) });
+    if (destroyed > 0 || bricksHit > 0 || towersHit > 0 || treesHit > 0 || fencesHit > 0 || tanksHit > 0 || roofHit > 0 || roofsCollapsed > 0 || resupplyHit > 0) {
+      log.info('damage', { destroyed, bricksHit, towersHit, treesHit, fencesHit, tanksHit, roofHit, roofsCollapsed, resupplyHit, radius, damage: damage.toFixed(1) });
     }
   }
 
@@ -720,7 +744,7 @@ export class DestructionSystem {
   }
 
   /** 诊断 */
-  get stats(): { intact: number; fragments: number; bricks: number; towers: number; trees: number; fences: number } {
+  get stats(): { intact: number; fragments: number; bricks: number; towers: number; trees: number; fences: number; resupply: number } {
     let intact = 0;
     for (const d of this.destructibles) if (d.state === 'intact') intact++;
     let towers = 0;
@@ -729,6 +753,8 @@ export class DestructionSystem {
     for (const tr of this.trees) if (tr.state === 'intact') trees++;
     let fences = 0;
     for (const f of this.fences) if (f.state === 'intact') fences++;
-    return { intact, fragments: this.fragments.length, bricks: this.bricks.length, towers, trees, fences };
+    let resupply = 0;
+    for (const rp of this.resupplyPoints) if (rp.state === 'intact') resupply++;
+    return { intact, fragments: this.fragments.length, bricks: this.bricks.length, towers, trees, fences, resupply };
   }
 }

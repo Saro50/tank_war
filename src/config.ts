@@ -295,6 +295,21 @@ export const CONFIG = {
     },
   },
 
+  /** 弹药补给(M5:炮弹总量限制 + 资源点装填)
+   * ------------------------------------------------------------
+   * 所有坦克统一:开火消耗弹药,归零禁射;驶入补给点半径内自动持续装填。
+   * 逼玩家管理弹药、回补给点,打破"无限倾泻"的单调节奏。 */
+  ammo: {
+    /** 每辆坦克炮弹上限(玩家/NPC 统一)。约够 16s 连射,够一场交战但有上限。 */
+    maxAmmo: 30,
+    /** 补给点装填速率(发/秒):30 发约 3.75s 补满。不能瞬补(防战斗中滥用)。 */
+    resupplyRate: 8,
+    /** 补给点装填半径(m):坦克驶入此半径即开始装填。 */
+    resupplyRadius: 5,
+    /** NPC 弹药≤此值时主动前往补给点(留余量防路上无还手之力)。 */
+    npcResupplyThreshold: 5,
+  },
+
   /** 破坏系统（M4） */
   destruction: {
     /** Voronoi 种子数(≈碎片数) */
@@ -545,9 +560,9 @@ export const CONFIG = {
     { variant: 'abrams', spawn: { x: 16, y: 0, z: 60 }, yaw: 0, player: false, team: 'neutral' },
     // NPC 敌坦(team:enemy + npc:true)。DirectorSystem 启动时接管,轮询分配巡逻区域。
     // 多辆分布东/西/北三个生成点(enemyFaction.spawnPoints),对应 east/north/south 巡逻区,避免挤一起
-    { variant: 'tiger', spawn: { x: 50, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true },
-    { variant: 'abrams', spawn: { x: -50, y: 0, z: 10 }, yaw: 0, player: false, team: 'enemy', npc: true },
-    { variant: 'tiger', spawn: { x: 0, y: 0, z: 56 }, yaw: 0, player: false, team: 'enemy', npc: true },
+    { variant: 'tiger', spawn: { x: 50, y: 0, z: 0 }, yaw: 0, player: false, team: 'enemy', npc: true, tier: 'rookie' },
+    { variant: 'abrams', spawn: { x: -50, y: 0, z: 10 }, yaw: 0, player: false, team: 'enemy', npc: true, tier: 'regular' },
+    { variant: 'tiger', spawn: { x: 0, y: 0, z: 56 }, yaw: 0, player: false, team: 'enemy', npc: true, tier: 'veteran' },
   ],
 
   /** NPC 机械AI参数(L3反射层 + FSM 用)。确定性,无 LLM */
@@ -561,6 +576,22 @@ export const CONFIG = {
     loseTargetTime: 3, // 目标脱离视野多久算"丢失"(秒,回到 PATROL)
     avoidanceRange: 6, // 前向避障射线安全距离(m),≈ moveSpeed×反应时间,够提前转向
     avoidanceAngle: 0.5, // 前向扇形半角(rad,≈28°),左前/右前射线偏角
+  },
+
+  /** NPC 难度梯度(差异化参数)
+   * ------------------------------------------------------------
+   * 与 npc(通用参数)分离:本表只放"随难度变化"的字段,按实例注入 NpcController。
+   *  - aimTime:     瞄准锁定秒。锁定后炮塔+炮管持续收敛达此秒数才允许开火。
+   *                 弱 NPC 蓄瞄久 → 给玩家反应/走位窗口。本需求的核心旋钮。
+   *  - aimTolerance:水平瞄准收敛阈值(rad),越小要求越准。
+   *  - aimNoise:    水平瞄准散布(rad,慢速随机游走),产生命中率梯度。
+   *  - reactionTime:发现目标后"反应过来"才开始蓄瞄的延迟(s)。
+   *  - fireRange/sightRange:射程/感知,按档位递增。
+   * 三档递进:新兵(慢/散)→老兵(中)→精英(快/准)。 */
+  npcTiers: {
+    rookie:  { name: '新兵', aimTime: 2.5, aimTolerance: 0.12, aimNoise: 0.06,  reactionTime: 0.8,  fireRange: 45, sightRange: 60 },
+    regular: { name: '老兵', aimTime: 1.4, aimTolerance: 0.08, aimNoise: 0.035, reactionTime: 0.45, fireRange: 50, sightRange: 65 },
+    veteran: { name: '精英', aimTime: 0.7, aimTolerance: 0.05, aimNoise: 0.018, reactionTime: 0.25, fireRange: 55, sightRange: 70 },
   },
 
   /** 敌方阵营资源(DirectorSystem 管理,未来 LLM 导演分配这些资源调控节奏) */
@@ -579,6 +610,25 @@ export const CONFIG = {
     ],
     maxConcurrent: 5, // 同场最大敌坦数(导演限流)
     reserveVariants: ['tiger', 'abrams'], // 可生成的型号池
+  },
+
+  /** 补给点(M5:可被摧毁、定时再生的弹药装填点)
+   * ------------------------------------------------------------
+   * 坦克驶入半径内自动装填;可被炮弹/撞击摧毁,摧毁后倒计时原位复活。
+   * 3 点均衡分布(玩家南、NPC 东/西/北 都能就近补给),鼓励机动与争夺。 */
+  resupplyPoint: {
+    /** 补给站 HP:hitDamage≈35 衰减后约 3 发直击可毁(战略资源,不至太脆也不至于太硬)。 */
+    hp: 100,
+    /** 被摧毁后再生时间(s):原位复活。摧毁方只能短期剥夺对方补给,不会永久瘫痪。 */
+    regenTime: 30,
+    /** 中央补给站建筑半尺寸(m,实心 fixed collider)。坦克撞不上需绕行至半径内装填。 */
+    stationHalf: { x: 1.0, y: 1.0, z: 1.0 },
+    /** 3 个补给点位置(均衡覆盖战场) */
+    points: [
+      { x: 0, z: 10 }, // 中央:战场核心争夺点
+      { x: 45, z: -25 }, // 东侧:玩家与东线 NPC 共用
+      { x: -45, z: 25 }, // 西侧:玩家与西线 NPC 共用
+    ],
   },
 
   /** 山(四周背景，静态不可破坏，环形围合村庄) */

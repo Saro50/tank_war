@@ -43,6 +43,16 @@ export class WeaponSystem {
   /** 每辆坦克独立的后坐量，避免切换坦克时串位 */
   private recoilByTank = new Map<number, number>();
 
+  // —— 弹药(M5:炮弹总量限制,按坦克独立计) ——
+  /** 弹药上限(所有坦克统一 CONFIG.ammo.maxAmmo) */
+  private readonly maxAmmo: number;
+  /** 每辆坦克的弹药量(按 tank.id 独立,与 recoilByTank 同模式)。
+   *  玩家 Tab 切换坦克后,各坦克保留各自弹药;NPC 各自 weapon 实例只有一个条目。
+   *  浮点:装填按速率平滑累加;开火以整发为单位扣减(fire 检查 ammo>=1)。 */
+  private readonly ammoByTank = new Map<number, number>();
+  /** 装填闪光计时(s):resupply 调用时置 0.25,update 递减;>0 表示本帧在装填(HUD 提示用) */
+  private resupplyFlash = 0;
+
   constructor(
     getActiveTank: () => IControllableTank,
     physics: PhysicsWorld,
@@ -56,17 +66,30 @@ export class WeaponSystem {
     this.render = render;
     this.shake = shake;
     this.destruction = destruction;
-    log.info('weapon system ready', { cooldown: `${CONFIG.weapon.fireCooldown}s` });
+    this.maxAmmo = CONFIG.ammo.maxAmmo;
+    log.info('weapon system ready', { cooldown: `${CONFIG.weapon.fireCooldown}s`, ammo: this.maxAmmo });
+  }
+
+  /** 取某坦克当前弹药(浮点);首次访问按满弹药初始化(惰性,避免构造时不知有哪些 tank) */
+  private ammoOf(tank: IControllableTank): number {
+    const a = this.ammoByTank.get(tank.id);
+    if (a === undefined) {
+      this.ammoByTank.set(tank.id, this.maxAmmo);
+      return this.maxAmmo;
+    }
+    return a;
   }
 
   update(input: InputState, dt: number): void {
     const tank = this.getActiveTank();
 
     // 冷却 + 边沿触发开火(按一次打一发)。被击毁后无法开火。
+    // 弹药检查:ammo>=1 才能开火;空仓时不触发 fire 也不设冷却(避免空仓误占冷却)。
     this.cooldown -= dt;
+    if (this.resupplyFlash > 0) this.resupplyFlash -= dt;
     const edge = input.fire && !this.prevFire;
     this.prevFire = input.fire;
-    if (edge && this.cooldown <= 0 && tank.state === 'intact') {
+    if (edge && this.cooldown <= 0 && tank.state === 'intact' && this.ammoOf(tank) >= 1) {
       this.fire(tank);
       this.cooldown = CONFIG.weapon.fireCooldown;
     }
@@ -104,7 +127,38 @@ export class WeaponSystem {
     return { projectiles: this.projectiles.length, explosions: this.explosions.length };
   }
 
+  // —— 弹药接口(M5,基于当前活性坦克) ——
+  /** 当前活性坦克的弹药数(整数已装好发数;内部浮点,装填平滑累加) */
+  getAmmo(): number {
+    return Math.floor(this.ammoOf(this.getActiveTank()));
+  }
+  /** 弹药上限 */
+  getMaxAmmo(): number {
+    return this.maxAmmo;
+  }
+  /** 当前活性坦克弹药是否耗尽(不足 1 发) */
+  isEmpty(): boolean {
+    return this.ammoOf(this.getActiveTank()) < 1;
+  }
+  /** 是否正在装填(本帧 resupply 触发,resupplyFlash>0)——HUD 提示用 */
+  isResupplying(): boolean {
+    return this.resupplyFlash > 0;
+  }
+  /**
+   * 装填补给(由 ResupplySystem 在坦克处于补给点半径内时调用)。
+   * 给当前活性坦克按速率平滑回弹,clamp 到上限;置 resupplyFlash 供 HUD 显示"装填中"。
+   * 依赖 weapon.activeTank == ResupplySystem 注册的 tank 的一致性(玩家/NPC 均成立)。
+   */
+  resupply(dt: number): void {
+    const tank = this.getActiveTank();
+    const cur = this.ammoOf(tank);
+    if (cur >= this.maxAmmo) return;
+    this.ammoByTank.set(tank.id, Math.min(this.maxAmmo, cur + CONFIG.ammo.resupplyRate * dt));
+    this.resupplyFlash = 0.25;
+  }
+
   private fire(tank: IControllableTank): void {
+    if (this.ammoOf(tank) < 1) return; // 弹药耗尽:空仓不发射(防御;update 边沿已挡)
     const cfg = CONFIG.weapon;
     const pos = tank.muzzleWorldPosition();
     const dir = tank.muzzleWorldDirection();
@@ -139,8 +193,12 @@ export class WeaponSystem {
     // 5. 相机震动(玩家开火;NPC weapon 无 shake,不震)
     this.shake?.add(0.8);
 
+    // 6. 弹药消耗(M5:开火扣 1 发,按坦克独立计)
+    this.ammoByTank.set(tank.id, this.ammoOf(tank) - 1);
+
     log.info('FIRE', {
       tank: tank.name,
+      ammo: `${Math.floor(this.ammoOf(tank))}/${this.maxAmmo}`,
       muzzle: `${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}`,
       dir: `${dir.x.toFixed(2)},${dir.y.toFixed(2)},${dir.z.toFixed(2)}`,
       impulse: J.toFixed(0),

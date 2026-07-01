@@ -15,6 +15,7 @@ const log = Logger.create('HUD');
 export class HUD {
   private readonly crosshair: HTMLDivElement;
   private readonly tankInfo: HTMLDivElement;
+  private readonly ammoInfo: HTMLDivElement;
   private mounted = false;
 
   constructor(container: HTMLElement) {
@@ -28,6 +29,18 @@ export class HUD {
     Object.assign(this.tankInfo.style, tankInfoStyle);
     this.tankInfo.textContent = '';
     container.appendChild(this.tankInfo);
+
+    // 弹药信息(右下角):弹药数 + 低弹药预警 + 耗尽闪烁 + 装填提示
+    this.ammoInfo = document.createElement('div');
+    Object.assign(this.ammoInfo.style, ammoInfoStyle);
+    this.ammoInfo.textContent = '';
+    container.appendChild(this.ammoInfo);
+
+    // 耗尽闪烁动画(注入一次性 <style>;用视觉强引导"必须去补给")
+    const styleEl = document.createElement('style');
+    styleEl.textContent =
+      '@keyframes tw-blink{0%,100%{opacity:1}50%{opacity:0.25}}.tw-blink{animation:tw-blink 0.6s steps(2) infinite}';
+    container.appendChild(styleEl);
 
     this.mounted = true;
     log.info('HUD ready');
@@ -43,12 +56,37 @@ export class HUD {
     this.crosshair.style.transform = `translate(${clientX}px, ${clientY}px) translate(-50%, -50%)`;
   }
 
-  /** 每帧更新当前附身坦克信息 */
-  update(tank: IControllableTank): void {
+  /**
+   * 每帧更新当前附身坦克信息。
+   * @param ammo 弹药信息(可选,main 从玩家 weapon 读取传入);缺省则不显示弹药(兼容旧调用)。
+   */
+  update(tank: IControllableTank, ammo?: { current: number; max: number; resupplying: boolean }): void {
     if (!this.mounted) return;
     const hp = Math.max(0, tank.getHp());
     const state = tank.state === 'intact' ? '完好' : '已击毁';
     this.tankInfo.textContent = `${tank.name}  |  HP ${hp}  |  ${state}`;
+
+    // 弹药状态(视觉引导:满=白 / 低=橙 / 耗尽=红闪烁 / 装填=绿)
+    if (ammo) {
+      const empty = ammo.current < 1;
+      const resupplying = ammo.resupplying && !empty;
+      if (empty) {
+        this.ammoInfo.textContent = '弹药耗尽 — 前往补给点装填';
+        this.ammoInfo.style.color = '#ff5252';
+        this.ammoInfo.classList.add('tw-blink'); // 闪烁强引导
+      } else if (resupplying) {
+        this.ammoInfo.textContent = `装填中  ${ammo.current} / ${ammo.max}`;
+        this.ammoInfo.style.color = '#7fff7f';
+        this.ammoInfo.classList.remove('tw-blink');
+      } else {
+        this.ammoInfo.textContent = `弹药  ${ammo.current} / ${ammo.max}`;
+        this.ammoInfo.style.color = ammo.current <= 5 ? '#ffaa33' : '#e6e6e6'; // 低弹药橙色预警
+        this.ammoInfo.classList.remove('tw-blink');
+      }
+    } else {
+      this.ammoInfo.textContent = '';
+      this.ammoInfo.classList.remove('tw-blink');
+    }
   }
 }
 
@@ -84,6 +122,22 @@ const tankInfoStyle: Partial<CSSStyleDeclaration> = {
   color: '#e6e6e6',
   background: 'rgba(20,22,28,0.75)',
   padding: '6px 10px',
+  borderRadius: '6px',
+  textShadow: '0 1px 2px rgba(0,0,0,0.6)',
+};
+
+const ammoInfoStyle: Partial<CSSStyleDeclaration> = {
+  position: 'absolute',
+  bottom: '12px',
+  right: '12px',
+  zIndex: '10',
+  pointerEvents: 'none',
+  fontFamily: 'monospace',
+  fontSize: '15px',
+  fontWeight: 'bold',
+  color: '#e6e6e6',
+  background: 'rgba(20,22,28,0.75)',
+  padding: '6px 12px',
   borderRadius: '6px',
   textShadow: '0 1px 2px rgba(0,0,0,0.6)',
 };

@@ -4,6 +4,7 @@ import type { IControllableTank } from '../entities/IControllableTank';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { TankController } from '../systems/TankController';
 import type { WeaponSystem } from '../systems/WeaponSystem';
+import type { ResupplySystem } from '../systems/ResupplySystem';
 import type { InputState } from '../systems/InputSystem';
 import { findNearestEnemy, hasLineOfSight } from './perception';
 import { Logger } from '../utils/Logger';
@@ -16,7 +17,45 @@ export interface NpcMission {
   waypoints: { x: number; z: number }[];
 }
 
-type NpcState = 'patrol' | 'approach' | 'engage' | 'retreat';
+/** NPC 难度档位(对应 CONFIG.npcTiers 的键) */
+export type NpcTier = 'rookie' | 'regular' | 'veteran';
+
+/**
+ * NPC 差异化行为参数(随难度变化的部分)
+ * ------------------------------------------------------------
+ * 与 CONFIG.npc(通用参数)分离:通用参数(scanInterval/retreat/避障等)所有档位共享,
+ * 本接口只含"随难度变化"的字段,由 CONFIG.npcTiers 按档位注入,实例级生效。
+ * 这样 DifficultySystem 可逐 NPC 调难度,而不影响全局通用行为。
+ */
+export interface NpcProfile {
+  /** 档位中文名(日志/HUD 用) */
+  name: string;
+  /** 瞄准锁定秒:炮塔+炮管持续收敛达此秒数才允许开火(本需求核心旋钮) */
+  aimTime: number;
+  /** 水平瞄准收敛阈值(rad),越小要求越准 */
+  aimTolerance: number;
+  /** 水平瞄准散布(rad,慢速随机游走),产生命中率梯度 */
+  aimNoise: number;
+  /** 发现目标后"反应过来"才开始蓄瞄的延迟(s) */
+  reactionTime: number;
+  /** 开火射程(m) */
+  fireRange: number;
+  /** 感知半径(m) */
+  sightRange: number;
+}
+
+/**
+ * 按档位解析 NPC 行为参数。
+ * 档位缺失/非法 → 回退 regular(老兵),避免旧配置无 tier 时过弱或过强。
+ */
+export function resolveNpcProfile(tier?: string): NpcProfile {
+  const tiers = CONFIG.npcTiers;
+  if (tier === 'rookie') return tiers.rookie;
+  if (tier === 'veteran') return tiers.veteran;
+  return tiers.regular;
+}
+
+type NpcState = 'patrol' | 'approach' | 'engage' | 'retreat' | 'resupply';
 
 const EMPTY_INPUT: InputState = {
   forward: 0,
@@ -58,6 +97,19 @@ export class NpcController {
   private targetVisible = false; // 本次 scan 是否在视野内看到目标(区分"记忆目标"与"当前可见")
   private retreatTimer = 0; // retreat 持续时间(超 retreatMaxTime 强制脱离,无回血避免无限后退)
   private stuckTimer = 0; // 卡住检测:想前进但实际速度低,累计后触发侧转绕障
+
+  // —— 瞄准系统状态(本需求新增) ——
+  /** 瞄准锁定累计(s):炮塔+炮管持续收敛且目标可见时累计,达 profile.aimTime 才可开火;
+   *  脱靶时快速衰减(×2),避免"曾对准就能打"的取巧。开火后归零,下一发重新蓄瞄。 */
+  private aimTimer = 0;
+  /** 目标可见累计(s):达 profile.reactionTime 才算"反应过来"开始蓄瞄。弱 NPC 反应慢。 */
+  private spotTimer = 0;
+  /** 当前水平瞄准散布(rad):慢速随机游走,叠加在目标方位上产生命中率差异。
+   *  每 0.3s 或开火后重 roll 一个 [-aimNoise, aimNoise] 内的新值。 */
+  private aimNoiseOffset = 0;
+  /** 散布重 roll 计时(到期触发 aimNoiseOffset 换新值) */
+  private aimNoiseTimer = 0;
+
   /** 创建时满血,作 retreat 阈值基准(接口无 maxHp,创建时快照) */
   private readonly maxHp: number;
   /** driveToward/away 算出的转向(-1..1),供 produceInput 取用 */
@@ -71,9 +123,13 @@ export class NpcController {
     private readonly weapon: WeaponSystem,
     private readonly enemies: () => IControllableTank[],
     private readonly physics: PhysicsWorld,
+    /** 本 NPC 的难度参数(按档位注入,实例级生效,不影响其他 NPC) */
+    private readonly profile: NpcProfile,
+    /** 补给系统(NPC 弹药耗尽时导航去最近补给点装填) */
+    private readonly resupply: ResupplySystem,
   ) {
     this.maxHp = tank.getHp();
-    log.info('npc ready', { tank: tank.displayName });
+    log.info('npc ready', { tank: tank.displayName, tier: profile.name });
   }
 
   /** 导演分配巡逻任务 */
@@ -112,19 +168,38 @@ export class NpcController {
       this.scanTimer = CONFIG.npc.scanInterval;
     }
 
+    // 瞄准散布:慢速随机游走(每 0.3s 重 roll),叠加在目标方位上产生命中率梯度。
+    // 开火时也会强制 aimNoiseTimer=0 触发重 roll,下一发打向新散布方向。
+    this.aimNoiseTimer -= dt;
+    if (this.aimNoiseTimer <= 0) {
+      this.aimNoiseOffset = (Math.random() * 2 - 1) * this.profile.aimNoise;
+      this.aimNoiseTimer = 0.3;
+    }
+
+    // 反应时间:目标持续可见才累计 spotTimer,达 reactionTime 才算"反应过来"开始蓄瞄;
+    // 看不见立即清零(重新发现要重新反应),弱 NPC 反应更慢。
+    if (this.target && this.targetVisible) {
+      this.spotTimer += dt;
+    } else {
+      this.spotTimer = 0;
+    }
+
     // 视野内无目标(本次 scan 没看到)但记忆中还有 target → 累计丢失时间
     if (this.target && !this.targetVisible) {
       this.loseTimer += dt;
     }
 
-    // 目标阵亡即时清空
+    // 目标阵亡即时清空(含瞄准进度)
     if (this.target && this.target.state !== 'intact') {
       this.target = undefined;
       this.targetVisible = false;
       this.loseTimer = 0;
+      this.aimTimer = 0;
+      this.spotTimer = 0;
     }
 
     this.transition(dt);
+    this.updateAimTimer(dt); // 蓄瞄计时:engage/retreat 且对准时累计,脱靶衰减
     this.input = this.produceInput();
     this.checkStuck(dt); // 卡住检测,可能覆盖 input.turn 触发绕障
   }
@@ -135,7 +210,7 @@ export class NpcController {
    * 留给 transition 判断超时丢失,避免目标短暂脱离视野就被放弃)。
    */
   private scan(): void {
-    const found = findNearestEnemy(this.tank, this.enemies(), CONFIG.npc.sightRange);
+    const found = findNearestEnemy(this.tank, this.enemies(), this.profile.sightRange);
     if (found) {
       this.target = found;
       this.targetVisible = true;
@@ -164,6 +239,8 @@ export class NpcController {
         this.target = undefined;
         this.targetVisible = false;
         this.loseTimer = 0;
+        this.aimTimer = 0;
+        this.spotTimer = 0;
         this.state = 'patrol';
       }
       return;
@@ -174,6 +251,31 @@ export class NpcController {
       return;
     }
 
+    // 弹药补给(M5):放 RETREAT 之后(保命优先于补给)。
+    //  - 已在 resupply:补满才走(或全部补给点被毁则回 patrol 等再生);
+    //  - 不在 resupply:弹药≤阈值 → 进入 resupply 自主导航去补给。
+    // resupply 中不被 target 判定打断(没弹药打了也没用);但血量骤降时上方
+    //  RETREAT 块仍会优先接管 → 保命第一。
+    const ammoFull = this.weapon.getAmmo() >= this.weapon.getMaxAmmo();
+    if (this.state === 'resupply') {
+      const hasPoint = this.resupply.nearestActivePoint(this.tank.body.translation()) !== undefined;
+      if (ammoFull || !hasPoint) {
+        log.info('npc resupply done', { tank: this.tank.displayName, ammo: this.weapon.getAmmo(), hasPoint });
+        this.state = this.target ? 'engage' : 'patrol';
+      }
+      return; // resupply 中不往下走(避免被 target 判定打断)
+    }
+    if (this.weapon.getAmmo() <= CONFIG.ammo.npcResupplyThreshold) {
+      // 有可用补给点才进 resupply;全被毁时不进——否则会在 patrol↔resupply 间
+      //  每帧震荡 + 日志刷屏。NPC 继续用剩余弹药作战/巡逻,等补给点再生后下次再进。
+      const hasPoint = this.resupply.nearestActivePoint(this.tank.body.translation()) !== undefined;
+      if (hasPoint) {
+        log.info('npc RESUPPLY', { tank: this.tank.displayName, ammo: this.weapon.getAmmo() });
+        this.state = 'resupply';
+      }
+      return;
+    }
+
     if (this.target) {
       // 视野丢失超时 → 放弃目标回巡逻(修复:原来 target 在就清 loseTimer 导致永不丢失)
       if (this.loseTimer > cfg.loseTargetTime) {
@@ -181,13 +283,15 @@ export class NpcController {
         this.target = undefined;
         this.targetVisible = false;
         this.loseTimer = 0;
+        this.aimTimer = 0;
+        this.spotTimer = 0;
         this.state = 'patrol';
         return;
       }
       const dist = this.distTo(this.target);
       const hasLOS = hasLineOfSight(this.physics, this.tank, this.target);
-      // 在射程且有视线 → ENGAGE;否则 APPROACH
-      this.state = dist <= cfg.fireRange && hasLOS ? 'engage' : 'approach';
+      // 在射程(按档位)且有视线 → ENGAGE;否则 APPROACH
+      this.state = dist <= this.profile.fireRange && hasLOS ? 'engage' : 'approach';
     } else {
       this.state = 'patrol';
     }
@@ -228,6 +332,8 @@ export class NpcController {
         return this.engageInput();
       case 'retreat':
         return this.retreatInput();
+      case 'resupply':
+        return this.resupplyInput();
     }
   }
 
@@ -257,26 +363,24 @@ export class NpcController {
       forward: 1,
       turn: this.lastTurn,
       turretDir: this.aimTurn(this.target),
-      barrelDir: 0,
-      fire: false,
+      barrelDir: this.aimBarrel(this.target), // 接近途中预瞄炮管(抛物线弹道补偿),进射程即可打
+      fire: false, // 接近中不开火(专注机动逼近),留给 engage/retreat
       switchNext: false,
       mouseX: 0,
       mouseY: 0,
     };
   }
 
-  /** ENGAGE:小幅机动(避免站桩) + 持续瞄准 + 满足条件开火 */
+  /** ENGAGE:小幅机动(避免站桩) + 持续瞄准(含抛物线弹道补偿) + 蓄瞄满足后开火 */
   private engageInput(): InputState {
     if (!this.target) return this.patrolInput();
     const sway = Math.sin(performance.now() * 0.0015) * 0.4; // 小幅前后机动
-    const aim = this.aimTurn(this.target);
-    const aligned = Math.abs(aim) < CONFIG.npc.aimTolerance * 3;
     return {
       forward: sway,
       turn: 0,
-      turretDir: aim,
-      barrelDir: 0,
-      fire: this.decideFire(aligned),
+      turretDir: this.aimTurn(this.target),
+      barrelDir: this.aimBarrel(this.target), // 炮管俯仰:抛物线弹道补偿(远距离抛射)
+      fire: this.decideFire(), // 内部检查蓄瞄(aimTimer>=aimTime)+对准+视线+冷却
       switchNext: false,
       mouseX: 0,
       mouseY: 0,
@@ -287,30 +391,81 @@ export class NpcController {
   private retreatInput(): InputState {
     if (!this.target) return this.patrolInput();
     this.driveAwayFrom(this.target.body.translation());
-    const aim = this.aimTurn(this.target);
-    const aligned = Math.abs(aim) < CONFIG.npc.aimTolerance * 3;
     return {
       forward: 1,
       turn: this.lastTurn,
-      turretDir: aim,
-      barrelDir: 0,
-      fire: this.decideFire(aligned),
+      turretDir: this.aimTurn(this.target),
+      barrelDir: this.aimBarrel(this.target), // 边撤边瞄:炮管同样做弹道补偿
+      fire: this.decideFire(),
       switchNext: false,
       mouseX: 0,
       mouseY: 0,
     };
   }
 
+  /**
+   * RESUPPLY:导航到最近可用补给点装填(M5)。
+   * 到达后停下(forward=0),装填由 ResupplySystem 自动完成(驶入半径即回弹);
+   * transition 检测满弹药后退出 resupply。无可用补给点(全被毁)→ 暂回巡逻等再生。
+   */
+  private resupplyInput(): InputState {
+    const myPos = this.tank.body.translation();
+    const dest = this.resupply.nearestActivePoint({ x: myPos.x, z: myPos.z });
+    if (!dest) return this.patrolInput(); // 无可用补给点:暂时巡逻等再生
+    const arrived = this.driveToward(dest, CONFIG.ammo.resupplyRadius * 0.7);
+    if (arrived) {
+      this.lastTurn = 0; // 到达:停下装填
+      return { forward: 0, turn: 0, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, mouseX: 0, mouseY: 0 };
+    }
+    return { forward: 1, turn: this.lastTurn, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, mouseX: 0, mouseY: 0 };
+  }
+
   // ============================================================
   // 控制辅助
   // ============================================================
 
-  /** 开火脉冲:冷却到 + 瞄准收敛 + 有视线 → true 一帧(触发 WeaponSystem 边沿) */
-  private decideFire(aligned: boolean): boolean {
-    if (this.fireCooldown > 0 || !aligned || !this.target) return false;
+  /**
+   * 开火脉冲(无参自算对准条件,内聚瞄准判定)。
+   * 四重前置(全满足才 true 一帧,触发 WeaponSystem 边沿开火):
+   *  1. fireCooldown 到(与武器冷却同步)
+   *  2. aimTimer >= profile.aimTime(蓄瞄足够;弱 NPC 蓄瞄久 → 玩家有反应窗口)
+   *  3. 当前帧炮塔+炮管都对准(水平误差<aimTolerance 且 俯仰误差<0.03rad)
+   *  4. 有视线(中间无遮挡)
+   * 开火后:重置 aimTimer(重新蓄瞄下一发)+ 强制散布重 roll(下一发打向新散布)。
+   */
+  private decideFire(): boolean {
+    if (this.fireCooldown > 0 || !this.target) return false;
+    if (this.aimTimer < this.profile.aimTime) return false;
+    // 当前帧对准复检(aimTimer 是历史累计,需确认此刻仍对准,避免打移动目标的滞后)
+    const turretErr = Math.abs(this.turretAimError(this.target));
+    const barrelErr = Math.abs(this.barrelAimError(this.target));
+    const aligned = turretErr < this.profile.aimTolerance && barrelErr < 0.03;
+    if (!aligned) return false;
     if (!hasLineOfSight(this.physics, this.tank, this.target)) return false;
     this.fireCooldown = CONFIG.weapon.fireCooldown; // 与武器冷却同步,防止持续触发
+    this.aimTimer = 0; // 开火后重新蓄瞄(下一发需再次锁定 aimTime 秒)
+    this.aimNoiseTimer = 0; // 立即换散布,下一发打向新方向
+    log.debug('npc fire', { tank: this.tank.displayName, tier: this.profile.name });
     return true;
+  }
+
+  /**
+   * 蓄瞄计时(每帧由 think 调用,介于 transition 与 produceInput 之间)。
+   * 仅 engage/retreat 蓄瞄;需 已反应(reactionTime) + 目标可见 + 当前对准 → aimTimer 累计;
+   * 脱靶则快速衰减(×2),避免"曾对准就能打"的取巧。判定标准与 decideFire 完全一致。
+   */
+  private updateAimTimer(dt: number): void {
+    if (this.state !== 'engage' && this.state !== 'retreat') return;
+    if (!this.target || !this.targetVisible) return;
+    if (this.spotTimer < this.profile.reactionTime) return; // 未反应,不蓄瞄
+    const turretErr = Math.abs(this.turretAimError(this.target));
+    const barrelErr = Math.abs(this.barrelAimError(this.target));
+    const aligned = turretErr < this.profile.aimTolerance && barrelErr < 0.03;
+    if (aligned) {
+      this.aimTimer += dt;
+    } else {
+      this.aimTimer = Math.max(0, this.aimTimer - dt * 2); // 脱靶快速流失
+    }
   }
 
   /**
@@ -348,15 +503,75 @@ export class NpcController {
     return Math.max(-1, Math.min(1, diff * 2)); // 放大系数,小偏差也转
   }
 
-  /** 炮塔转向目标:返回 turretDir(-1..1)。炮塔世界角 = 车身 yaw + 炮塔相对角 */
-  private aimTurn(target: IControllableTank): number {
+  /**
+   * 炮塔瞄准误差(水平):目标方位与炮塔世界偏航的夹角(rad,-PI..PI)。
+   * 在目标方位上叠加 aimNoiseOffset(慢速随机散布),产生命中率梯度。
+   * turretAimError 供 updateAimTimer/decideFire 判定对准;aimTurn 据此产 turretDir。
+   */
+  private turretAimError(target: IControllableTank): number {
     const sp = this.tank.body.translation();
     const tp = target.body.translation();
-    const desiredWorldYaw = Math.atan2(tp.x - sp.x, tp.z - sp.z);
+    const desiredWorldYaw = Math.atan2(tp.x - sp.x, tp.z - sp.z) + this.aimNoiseOffset;
     const turretWorldYaw = this.bodyYaw + this.tank.turret.rotation.y;
-    let diff = desiredWorldYaw - turretWorldYaw;
-    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    const diff = desiredWorldYaw - turretWorldYaw;
+    return Math.atan2(Math.sin(diff), Math.cos(diff));
+  }
+
+  /** 炮塔转向目标:据瞄准误差产 turretDir(-1..1) */
+  private aimTurn(target: IControllableTank): number {
+    const diff = this.turretAimError(target);
     return Math.max(-1, Math.min(1, diff * 3));
+  }
+
+  /**
+   * 抛物线弹道解算:给定炮口与目标,反解炮管仰角(rad),使炮弹抛物落点≈目标。
+   * ------------------------------------------------------------
+   * 物理前提:炮弹是受重力 g 的 dynamic 刚体、LinearDamping=0(无空气阻力),
+   * 初速 v=muzzleVelocity 恒定。游戏化近似,忽略 Coriolis/风。
+   *
+   * 推导:水平匀速 t=d/(v·cosθ);垂直 Δy=v·sinθ·t−½g·t²。
+   *       令 u=tanθ,用 1/cos²θ=1+tan²θ 消元得关于 u 的二次方程:
+   *         A·u² − d·u + (Δy + A) = 0,  其中 A = g·d²/(2v²)。
+   *       判别式≥0 取较小根 u=(d−√Δ)/(2A)(平直弹道,落点准);
+   *       <0 表示目标超出最大射程,取炮管最大仰角尽力抛射。
+   *
+   * 仰角最终 clamp 到炮管机械限位(pitchRange),超出则命中率自然下降——
+   * 这正是"远距离难打"的现实,符合难度梯度设计。
+   */
+  private solveBallisticPitch(target: IControllableTank): number {
+    const muzzle = this.tank.muzzleWorldPosition();
+    const tp = target.body.translation();
+    const dx = tp.x - muzzle.x;
+    const dz = tp.z - muzzle.z;
+    const d = Math.hypot(dx, dz);
+    const dy = tp.y - muzzle.y;
+    const v = CONFIG.weapon.projectile.muzzleVelocity;
+    const g = Math.abs(CONFIG.physics.gravity.y);
+    const range = this.tank.driveConfig.barrel.pitchRange;
+    if (d < 1) return 0; // 太近:水平直射,无需补偿
+    const A = (g * d * d) / (2 * v * v);
+    const disc = d * d - 4 * A * (dy + A);
+    const u = disc < 0 ? Math.tan(range.max) : (d - Math.sqrt(disc)) / (2 * A);
+    const pitch = Math.atan(u);
+    return Math.max(range.min, Math.min(range.max, pitch));
+  }
+
+  /** 炮管俯仰误差:目标仰角 − 当前炮管角(rad)。正=需抬起,负=需压低。 */
+  private barrelAimError(target: IControllableTank): number {
+    return this.solveBallisticPitch(target) - this.tank.barrel.rotation.x;
+  }
+
+  /**
+   * 炮管俯仰输入:据俯仰误差产 barrelDir(-1/0/1),带死区防微抖。
+   * 不直接设角度,而是产方向输入交由 TankController.applyAim 的 pitchSpeed 积分驱动,
+   * 保持"NPC 只产 InputState、复用玩家驾驶层"的架构一致性。
+   */
+  private aimBarrel(target: IControllableTank): number {
+    const diff = this.barrelAimError(target);
+    const dead = 0.02; // 死区(rad≈1.1°),误差小于此不再调整,防炮管来回微抖
+    if (diff > dead) return 1;
+    if (diff < -dead) return -1;
+    return 0;
   }
 
   /** 水平距离到目标 */

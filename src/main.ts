@@ -13,6 +13,8 @@ import { TankSwitcher } from './systems/TankSwitcher';
 import { WeaponSystem } from './systems/WeaponSystem';
 import { DestructionSystem } from './systems/DestructionSystem';
 import { DirectorSystem } from './systems/DirectorSystem';
+import { ResupplySystem } from './systems/ResupplySystem';
+import { ResupplyPoint } from './entities/ResupplyPoint';
 import { CameraShake } from './effects/CameraShake';
 import { TuningPanel } from './ui/TuningPanel';
 import { HUD } from './ui/HUD';
@@ -89,8 +91,13 @@ async function main(): Promise<void> {
   destruction.setActiveTank(switcher.activeTank);
   tuningPanel?.setTankName(switcher.activeTank.displayName);
 
-  // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。未来 LLM 接入点
-  const director = new DirectorSystem(physics, render, destruction, controllableTanks);
+  // 补给系统(M5):先创建,再构建补给点(注册到 destruction 伤害链 + resupply 装填判定),
+  // 之后 director 创建 NPC 时把 resupply 传入(NPC 弹药耗尽自主补给 + 注册装填)。
+  const resupply = new ResupplySystem();
+  buildResupplyPoints(physics, render, destruction, resupply);
+
+  // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。传入 resupply:NPC 弹药机制。未来 LLM 接入点
+  const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply);
 
   const input = new InputSystem();
   input.attach();
@@ -98,6 +105,9 @@ async function main(): Promise<void> {
   const controller = new TankController(switcher.activeTank, render);
   const shake = new CameraShake(render.camera);
   const weapon = new WeaponSystem(() => switcher.activeTank, physics, render, shake, destruction);
+
+  // 注册玩家坦克到补给系统(用 getter:Tab 切换附身坦克后,装填自动跟随新的 activeTank)
+  resupply.register(() => switcher.activeTank, weapon);
 
   // 切换坦克回调：释放旧单位、附身新单位、重置控制器、更新各子系统
   switcher.onSwitch = (newTank, oldTank): void => {
@@ -109,7 +119,7 @@ async function main(): Promise<void> {
     tuningPanel?.setTankName(newTank.displayName);
   };
 
-  const loop = startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud, director);
+  const loop = startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud, director, resupply);
 
   // 注册清理回调：HMR/页面卸载时停止循环、解绑输入、释放资源，防止内存泄漏与重复监听
   const cleanup = (): void => {
@@ -198,6 +208,27 @@ function buildVillage(destruction: DestructionSystem): void {
     placed++;
   }
   log.info('village built', { houses: houses.length, trees: placed });
+}
+
+/**
+ * 构建补给点(M5)
+ * ------------------------------------------------------------
+ * 遍历 CONFIG.resupplyPoint.points 创建补给点,双重注册:
+ *  - destruction.addResupplyPoint : 接入伤害链(可被炮弹/撞击摧毁)
+ *  - resupply.addPoint            : 接入装填判定(坦克驶入自动装填)+ NPC 导航查询
+ */
+function buildResupplyPoints(
+  physics: PhysicsWorld,
+  render: RenderScene,
+  destruction: DestructionSystem,
+  resupply: ResupplySystem,
+): void {
+  for (const p of CONFIG.resupplyPoint.points) {
+    const rp = new ResupplyPoint(physics, render, { x: p.x, z: p.z });
+    destruction.addResupplyPoint(rp);
+    resupply.addPoint(rp);
+  }
+  log.info('resupply points built', { count: CONFIG.resupplyPoint.points.length });
 }
 
 /**
@@ -309,6 +340,7 @@ function startLoop(
   destruction: DestructionSystem,
   hud: HUD,
   director: DirectorSystem,
+  resupply: ResupplySystem,
 ): { stop: () => void } {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
@@ -337,7 +369,11 @@ function startLoop(
 
     const activeTank = switcher.activeTank;
     hud.setCrosshair(input.state.mouseX, input.state.mouseY);
-    hud.update(activeTank);
+    hud.update(activeTank, {
+      current: weapon.getAmmo(),
+      max: weapon.getMaxAmmo(),
+      resupplying: weapon.isResupplying(),
+    });
 
     controller.applyDrive(state);
     director.updateDrive(frameTime); // NPC step 前:决策 + drive
@@ -366,6 +402,7 @@ function startLoop(
     director.update(frameTime); // NPC step 后:aim + weapon
     shake.update(frameTime);
     destruction.update(frameTime);
+    resupply.update(frameTime); // 补给点再生 + 装填判定(M5)
 
     frame++;
     // 周期诊断日志仅在调试模式输出(关闭时连计算都省)
@@ -383,6 +420,8 @@ function startLoop(
         barrel: `${aim.barrelDeg.toFixed(0)}°`,
         proj: w.projectiles,
         expl: w.explosions,
+        ammo: `${weapon.getAmmo()}/${weapon.getMaxAmmo()}`,
+        supply: `${resupply.stats.activePoints}/${resupply.stats.points}`,
         intact: d.intact,
         frags: d.fragments,
         bricks: d.bricks,

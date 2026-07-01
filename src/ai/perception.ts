@@ -62,7 +62,10 @@ export function hasLineOfSight(
   // 射线起点抬高到炮塔中部,避免贴地误判地面 collider
   const origin = { x: from.x, y: 1.5, z: from.z };
   const ray = new RAPIER.Ray(origin, dir);
-  // 排除观察者自身 body;命中 toi < hDist-0.5 视为中间有障碍
+  // 排除 observer 自身 body(防起点在自身 collider 内被命中)。
+  // castRay 返回 RayColliderHit(含 .collider):若命中 target 自身 collider
+  //  = target 前缘(不挡自己)= 通畅;命中其他 = 中间障碍 = 被挡。精确无容差。
   const hit = physics.world.castRay(ray, hDist, true, undefined, undefined, undefined, observer.body);
-  return hit === null || hit.timeOfImpact >= hDist - 0.5;
+  if (hit === null) return true; // 未命中任何 collider(到 maxToi 无障碍) = 通畅
+  return hit.collider.handle === target.colliderHandle; // 命中 target 自己=通畅,否则被挡
 }

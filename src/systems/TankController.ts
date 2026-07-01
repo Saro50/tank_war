@@ -205,7 +205,9 @@ export class TankController {
   }
 
   /**
-   * 第三人称相机：偏移随车身 yaw 旋转，始终在车尾后方看车头。
+   * 第三人称相机：偏移随【炮塔世界偏航】旋转(= 车身 yaw + 炮塔相对角),
+   * 始终在炮塔后方(炮管反方向)看炮管前方——视角跟随炮塔,不跟随车身。
+   * 体验:玩家转炮塔(Q/W)= 转视角;转车身(←/→)时画面不跟随,车归车瞄归瞄。
    * 拆为 public:玩家侧 main 显式调用(每帧);AI 侧不调用(不抢玩家相机)。
    * 被击毁也调用——跟随残骸。
    */
@@ -218,7 +220,7 @@ export class TankController {
 
   private computeCamera(out: Vector3): void {
     const cfg = this.tank.driveConfig.camera;
-    const yaw = this.bodyYaw;
+    const yaw = this.turretWorldYaw; // 视角基准=炮塔世界偏航(非车身 yaw)
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
     const t = this.tank.body.translation();
@@ -241,6 +243,11 @@ export class TankController {
   private get bodyYaw(): number {
     const q = this.tank.body.rotation();
     return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+  }
+
+  /** 炮塔世界偏航(rad)= 车身 yaw + 炮塔相对旋转角。相机视角跟随此值。 */
+  private get turretWorldYaw(): number {
+    return this.bodyYaw + this.tank.turret.rotation.y;
   }
 
   /** 诊断用：当前炮塔角/炮管俯仰(度) */
