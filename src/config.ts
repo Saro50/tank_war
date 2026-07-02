@@ -574,8 +574,8 @@ export const CONFIG = {
     retreatMaxTime: 8, // retreat 持续超此秒数→强制脱离回 PATROL(无回血机制,避免无限后退)
     scanInterval: 0.2, // 感知扫描频率(秒,不必每帧扫)
     loseTargetTime: 3, // 目标脱离视野多久算"丢失"(秒,回到 PATROL)
-    avoidanceRange: 6, // 前向避障射线安全距离(m),≈ moveSpeed×反应时间,够提前转向
-    avoidanceAngle: 0.5, // 前向扇形半角(rad,≈28°),左前/右前射线偏角
+    avoidanceRange: 10, // 前向避障射线安全距离(m);9m/s 车速需更长反应距离,避免高速转向撞障
+    avoidanceAngle: 0.7, // 前向扇形半角(rad,≈40°);加宽以更早发现侧前障碍
   },
 
   /** NPC 难度梯度(差异化参数)
@@ -608,8 +608,88 @@ export const CONFIG = {
       { id: 'east', waypoints: [{ x: 56, z: 20 }, { x: 60, z: -16 }, { x: 44, z: -36 }] },
       { id: 'south', waypoints: [{ x: -36, z: -44 }, { x: 0, z: -36 }, { x: 32, z: -48 }] },
     ],
-    maxConcurrent: 5, // 同场最大敌坦数(导演限流)
+    maxConcurrent: 5, // 同场最大敌坦数(导演硬上限)
+    targetConcurrent: 3, // 目标同场敌坦数(维持持续 3v1 压力)
+    spawnInterval: 10, // 击毁后补充间隔(s,给玩家喘息窗口)
     reserveVariants: ['tiger', 'abrams'], // 可生成的型号池
+  },
+
+  /** AI 导演策略(A1波次 + A2姿态调控)
+   * ------------------------------------------------------------
+   * 导演按态势评估 → 切换全阵营姿态 → 修饰所有 NPC 行为参数(反应/蓄瞄/撤退),
+   * 让 NPC 有"集体智能"(玩家残血时被猛攻、NPC 残血时收缩),而非各自为战。 */
+  director: {
+    /** 姿态评估周期(s);不必每帧评,省算 */
+    postureEvalInterval: 1.0,
+    /** aggro 触发:玩家血量(占 maxHp)低于此比例 → 全阵营激进追击 */
+    aggroPlayerHpRatio: 0.4,
+    /** defensive 触发:存活 NPC 平均血量低于此比例 → 全阵营收缩保守 */
+    defensiveNpcHpRatio: 0.5,
+    /** 姿态参数修饰系数(乘到 NPC profile/npc 参数上) */
+    postureMod: {
+      aggro:     { reaction: 0.6, aimTime: 0.8, retreat: 0.5 }, // 反应快/蓄瞄快/少撤退
+      normal:    { reaction: 1.0, aimTime: 1.0, retreat: 1.0 },
+      defensive: { reaction: 1.5, aimTime: 1.2, retreat: 1.5 }, // 反应慢/更早撤退
+    },
+  },
+
+  /** 关卡清单(开始界面供玩家选择)
+   * ------------------------------------------------------------
+   * 每关声明获胜方式(objectiveType)+ 专属参数(target 等)+ UI 文案。
+   * 开始界面渲染为可选卡片,玩家选中后 main 按 objectiveType 创建对应
+   * Objective(+ 关卡专属实体,如占领军创建 CaptureZone)。
+   *
+   * 新增关卡只需:① 往此数组加一条;② 加对应 Objective 实现 + 工厂分支;
+   *               ③ 若需专属实体(如占领点)在 main 选关回调里按 level.id 创建。
+   * main/UI 数据驱动,加关卡不动循环/UI 主体。
+   */
+  levels: [
+    {
+      id: 'kill',
+      name: '歼灭战',
+      brief: '击毁 15 辆敌坦',
+      tip: '全图搜索并歼灭敌方坦克,弹药有限注意补给',
+      objectiveType: 'kill',
+      target: 15, // 击毁目标数
+    },
+    {
+      id: 'capture',
+      name: '占领军',
+      brief: '占领中央据点 60 秒',
+      tip: '驶入中央据点驻留累计时间,敌方会来抢;进度满获胜,敌方占满则失败',
+      objectiveType: 'capture',
+      target: 60, // 玩方占领达此秒数 → 胜利
+      enemyTarget: 60, // 敌方占领达此秒数 → 玩家失败
+    },
+  ],
+
+  /** 占领点(仅 'capture' 关卡创建;歼灭战无此实体)
+   * ------------------------------------------------------------
+   * 中央据点:坦克驶入半径内即开始占领。无物理碰撞体(坦克可穿过中心),
+   * 不可摧毁(纯区域 + 视觉)。视觉用与补给点完全不同的色系(蓝/红 vs 绿)区分。
+   *
+   * 进度规则(由 CaptureSystem 每帧推进):
+   *  - 区域内只有玩家 → 玩家进度 += playerRate
+   *  - 区域内只有敌方 → 敌方进度 += enemyRate(达 enemyTarget 玩家失败)
+   *  - 双方同区(contestedFreeze=true)→ 进度冻结(避免"站着蹭")
+   *  - 区域空 → 双方进度按 decayRate 回退(避免"蹭一下就稳住") */
+  capturePoint: {
+    /** 占领点位置:战场腹地(z=28),玩家(0,-16)往北推进 44m;与中央补给点(0,10)
+     *  距离 18m 清晰分离;敌方(0,56)往南 28m。给玩家"进攻"节奏感。 */
+    position: { x: 0, z: 28 },
+    /** 占领半径(m):比补给点半径(5)更大,容得下双方对枪争夺 */
+    radius: 8,
+    /** 玩方占领推进速率(进度秒/秒) */
+    playerRate: 1.0,
+    /** 敌方占领推进速率(进度秒/秒) */
+    enemyRate: 1.0,
+    /** 空区回退速率(秒/秒):区域内无坦克时双方进度按此回退 */
+    decayRate: 0.5,
+    /** 争夺态冻结:true=双方同区进度完全冻结 */
+    contestedFreeze: true,
+    /** NPC 巡逻围绕半径(m):占领军关卡 DirectorSystem 给 NPC 分配的巡逻 waypoint
+     *  以占领点为圆心、此半径布点,NPC 自然在据点周围逗留形成对抗。 */
+    npcPatrolRadius: 6,
   },
 
   /** 补给点(M5:可被摧毁、定时再生的弹药装填点)

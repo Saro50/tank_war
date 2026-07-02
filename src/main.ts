@@ -14,7 +14,11 @@ import { WeaponSystem } from './systems/WeaponSystem';
 import { DestructionSystem } from './systems/DestructionSystem';
 import { DirectorSystem } from './systems/DirectorSystem';
 import { ResupplySystem } from './systems/ResupplySystem';
+import { CaptureSystem } from './systems/CaptureSystem';
+import { createObjective, type Objective, type LevelConfig } from './systems/Objective';
 import { ResupplyPoint } from './entities/ResupplyPoint';
+import { CaptureZone } from './entities/CaptureZone';
+import { Overlay } from './ui/Overlay';
 import { CameraShake } from './effects/CameraShake';
 import { TuningPanel } from './ui/TuningPanel';
 import { HUD } from './ui/HUD';
@@ -96,8 +100,15 @@ async function main(): Promise<void> {
   const resupply = new ResupplySystem();
   buildResupplyPoints(physics, render, destruction, resupply);
 
-  // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。传入 resupply:NPC 弹药机制。未来 LLM 接入点
-  const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply);
+  // 占领系统(始终创建:歼灭战无 zone 时空转;占领军选关后 setZone 激活)。
+  // 传给 director:NPC 创建/摧毁时注册/注销,纳入占领判定。
+  const capture = new CaptureSystem();
+  // 玩家用 getter:Tab 切换附身坦克后,占领判定跟随新的 activeTank
+  capture.registerPlayer(() => switcher.activeTank);
+
+  // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。传入 resupply:NPC 弹药机制
+  // + capture:NPC 纳入占领判定(创建/摧毁时注册/注销)。未来 LLM 接入点
+  const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply, capture);
 
   const input = new InputSystem();
   input.attach();
@@ -111,15 +122,56 @@ async function main(): Promise<void> {
 
   // 切换坦克回调：释放旧单位、附身新单位、重置控制器、更新各子系统
   switcher.onSwitch = (newTank, oldTank): void => {
-    oldTank.release();
-    newTank.possess();
+    // 附身 NPC 时暂停其 AI(避免与玩家双重控制);切走时恢复
+    director.setNpcPaused(oldTank, false);
+    director.setNpcPaused(newTank, true);
+    // NPC 已是 dynamic(director 启动时 possess),不 release/possess(保持可被 AI 驱动);
+    // 非 NPC(玩家 T-14)正常 release/possess
+    if (!director.isNpc(oldTank)) oldTank.release();
+    if (!director.isNpc(newTank)) newTank.possess();
     controller.setTank(newTank);
     controller.snapCamera();
     destruction.setActiveTank(newTank);
     tuningPanel?.setTankName(newTank.displayName);
   };
 
-  const loop = startLoop(physics, render, input, switcher, controller, weapon, shake, destruction, hud, director, resupply);
+  // 游戏状态机(menu→playing→won/lost)+ 覆盖层(关卡选择/结算/姿态横幅)。
+  // objective 延后创建:玩家在开始界面选关后,由 onStart 回调按 level 配置创建
+  // (歼灭战→KillObjective / 占领军→CaptureObjective + CaptureZone)。
+  let objective: Objective | undefined;
+  const game = { state: 'menu' as GameState, startTime: 0 };
+  const overlay = new Overlay(
+    container,
+    (levelId: string): void => {
+      // 选关启动:按 level 配置创建对应 Objective(读 director/capture 进度判定胜负)
+      const level: LevelConfig = CONFIG.levels.find((l) => l.id === levelId) ?? CONFIG.levels[0];
+      objective = createObjective(level, {
+        getKillCount: () => director.killCount,
+        capture,
+      });
+      // 占领军专属:创建据点 + 激活占领系统 + 令现存 NPC 围绕据点巡逻(形成对抗)
+      if (level.id === 'capture') {
+        const cfg = CONFIG.capturePoint;
+        const zone = new CaptureZone(render, cfg.position);
+        // level 此处已收窄为 capture 关卡类型,enemyTarget 字段存在;歼灭战分支不进此块
+        capture.setZone(zone, level.target, level.enemyTarget);
+        director.setCaptureTarget(cfg.position, cfg.npcPatrolRadius);
+        log.info('capture level setup', { at: `${cfg.position.x},${cfg.position.z}` });
+      }
+      game.state = 'playing';
+      game.startTime = performance.now();
+      log.info('game start', { level: level.id, objective: objective.description });
+    },
+    () => location.reload(),
+  );
+  overlay.showMenu();
+
+  // objective 用 getter 传入:startLoop 启动时 objective 尚未创建(选关前),
+  // 用闭包读 main 的 objective 变量最新值(选关回调赋值后 loop 即可见)
+  const loop = startLoop(
+    physics, render, input, switcher, controller, weapon, shake, destruction,
+    hud, director, resupply, capture, () => objective, overlay, game,
+  );
 
   // 注册清理回调：HMR/页面卸载时停止循环、解绑输入、释放资源，防止内存泄漏与重复监听
   const cleanup = (): void => {
@@ -187,6 +239,8 @@ function buildVillage(destruction: DestructionSystem): void {
     { x: 64, z: 8, r: 3.5 },
     // 坦克避让从 CONFIG.tanks 派生(而非硬编码):加坦克自动避让,无需同步两处(DRY)
     ...CONFIG.tanks.map((t) => ({ x: t.spawn.x, z: t.spawn.z, r: 4 })),
+    // 占领点避让:据点位置不种树(占领军关卡据点视觉清晰;歼灭战无据点,少一棵树无害)
+    { x: CONFIG.capturePoint.position.x, z: CONFIG.capturePoint.position.z, r: CONFIG.capturePoint.radius + 2 },
   ];
   let placed = 0;
   let tries = 0;
@@ -240,7 +294,7 @@ function buildResupplyPoints(
  * StaticTankBase 子类注册到 destruction 作可破坏目标。
  * 返回:
  *  - tanks:       全部坦克(含NPC) → 给 destruction(受击)/director(接管NPC)
- *  - switchable:  非NPC坦克      → 给 switcher(玩家 Tab 只切到这些,避免附身敌方双重控制)
+ *  - switchable:  玩家+NPC坦克   → 给 switcher(debug Tab 可切玩家或 NPC;附身 NPC 时暂停其 AI)
  *  - playerIndex: 玩家初始在 switchable 中的索引
  *
  * 配置 spawn.y 统一为【地面高度】,各子类构造内部按需抬高(createTank/buildTanks 不关心)。
@@ -268,12 +322,11 @@ function buildTanks(
     // 静态型号(tiger/abrams,StaticTankBase 子类)注册为可破坏目标
     if (tank instanceof StaticTankBase) destruction.addStaticTank(tank);
     tanks.push(tank);
-    // npc:true 不进 switchable:玩家 Tab 不可附身敌方,避免与 NpcController 双重控制冲突
+    // 切换列表(switchable) = 玩家 + NPC 敌坦(debug 可附身观察/控制正在行进的 NPC);
+    // 中立静态靶子(非玩家非NPC)不进——debug 不需要附身静态靶子。
+    // 附身 NPC 时 DirectorSystem 暂停其 AI(见 main.onSwitch),避免双重控制。
     const isNpc = (cfg as { npc?: boolean }).npc === true;
-    if (isNpc) {
-      if (cfg.player) log.warn('npc tank marked player, ignored for switch', { index: i });
-      continue;
-    }
+    if (!isNpc && !cfg.player) continue; // 中立静态靶子:不进切换列表
     if (cfg.player) {
       if (playerIndex === -1) playerIndex = switchable.length;
       playerCount++;
@@ -328,6 +381,17 @@ function buildMountains(physics: PhysicsWorld, render: RenderScene): void {
   log.info('mountains built', { count: cfg.count });
 }
 
+/** 游戏状态机:menu(开始界面) → playing(作战) → won/lost(结算)。未来可加 paused/多关流转 */
+type GameState = 'menu' | 'playing' | 'won' | 'lost';
+
+/** 用时格式化 m:ss(从 startTime 到现在) */
+function elapsedText(startTime: number): string {
+  const sec = Math.max(0, Math.floor((performance.now() - startTime) / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 /** 主循环 */
 function startLoop(
   physics: PhysicsWorld,
@@ -341,6 +405,12 @@ function startLoop(
   hud: HUD,
   director: DirectorSystem,
   resupply: ResupplySystem,
+  /** 占领系统:每帧推进占领进度(歼灭战无 zone 时空转) */
+  capture: CaptureSystem,
+  /** 关卡目标 getter:选关前为 undefined,选关后才有实例(故用 getter 闭包读最新值) */
+  getObjective: () => Objective | undefined,
+  overlay: Overlay,
+  game: { state: GameState; startTime: number },
 ): { stop: () => void } {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
@@ -359,54 +429,93 @@ function startLoop(
     last = now;
     if (frameTime > 0.25) frameTime = 0.25;
 
-    const state = input.state;
+    const inputState = input.state;
+    const playing = game.state === 'playing';
 
-    // Tab 切换仅在调试模式生效;关闭时仅初始玩家坦克可操控
-    if (isDebug() && state.switchNext && !prevSwitchNext) {
+    // Tab 切换仅在调试模式 + playing 时生效(menu/结算不切)
+    if (playing && isDebug() && inputState.switchNext && !prevSwitchNext) {
       switcher.next();
     }
-    prevSwitchNext = state.switchNext;
+    prevSwitchNext = inputState.switchNext;
 
     const activeTank = switcher.activeTank;
-    hud.setCrosshair(input.state.mouseX, input.state.mouseY);
-    hud.update(activeTank, {
-      current: weapon.getAmmo(),
-      max: weapon.getMaxAmmo(),
-      resupplying: weapon.isResupplying(),
-    });
+    // 菜单显隐(按状态控制,幂等)
+    if (game.state === 'menu') overlay.showMenu();
+    else overlay.hideMenu();
 
-    controller.applyDrive(state);
-    director.updateDrive(frameTime); // NPC step 前:决策 + drive
+    hud.setCrosshair(input.state.mouseX, input.state.mouseY);
+    hud.update(
+      activeTank,
+      { current: weapon.getAmmo(), max: weapon.getMaxAmmo(), resupplying: weapon.isResupplying() },
+      getObjective(),
+    );
+    overlay.updatePosture(director.posture);
+
+    // 仅 playing 推进游戏;menu/won/lost 冻结(物理/NPC/输入不动),仅渲染场景
+    if (playing) {
+      controller.applyDrive(inputState);
+      director.updateDrive(frameTime); // NPC step 前:决策 + drive
+    }
     acc += frameTime;
     let steps = 0;
-    while (acc >= dt && steps < maxSub) {
+    while (playing && acc >= dt && steps < maxSub) {
       physics.step();
       acc -= dt;
       steps++;
     }
+    if (!playing) acc = 0; // 冻结期清累计,避免恢复时追帧
     SyncBridge.sync();
 
-    // 统一 drain 碰撞事件，分发给武器(炮弹命中) + 破坏(树/栅栏被撞倒)
-    // 注意：drainCollisionEvents 是消耗式的，必须集中一次 drain 再分发，
-    // 否则一个系统 drain 走所有事件，另一个系统拿不到。
-    physics.eventQueue.drainCollisionEvents((h1, h2, started) => {
-      if (!started) return;
-      weapon.handleCollision(h1, h2);
-      director.handleCollision(h1, h2); // NPC 炮弹命中分发
-      destruction.handleCollision(h1, h2);
-    });
+    if (playing) {
+      // 统一 drain 碰撞事件，分发给武器(炮弹命中) + 破坏(树/栅栏被撞倒)
+      // 注意：drainCollisionEvents 是消耗式的，必须集中一次 drain 再分发，
+      // 否则一个系统 drain 走所有事件，另一个系统拿不到。
+      physics.eventQueue.drainCollisionEvents((h1, h2, started) => {
+        if (!started) return;
+        weapon.handleCollision(h1, h2);
+        director.handleCollision(h1, h2); // NPC 炮弹命中分发
+        destruction.handleCollision(h1, h2);
+      });
+      controller.applyAim(inputState, frameTime);
+      weapon.update(inputState, frameTime);
+      director.update(frameTime); // NPC step 后:aim + weapon
+      shake.update(frameTime);
+      destruction.update(frameTime);
+      resupply.update(frameTime); // 补给点再生 + 装填判定(M5)
+      capture.update(frameTime); // 占领进度推进(占领军);歼灭战空转
+    }
+    controller.updateCamera(); // 始终:menu/结算时相机也看战场背景
 
-    controller.applyAim(state, frameTime);
-    controller.updateCamera();
-    weapon.update(state, frameTime);
-    director.update(frameTime); // NPC step 后:aim + weapon
-    shake.update(frameTime);
-    destruction.update(frameTime);
-    resupply.update(frameTime); // 补给点再生 + 装填判定(M5)
+    // 胜负检测(仅 playing):目标达成→won,玩家死/敌方占满→lost
+    if (playing) {
+      const obj = getObjective();
+      if (obj) {
+        if (obj.completed) {
+          game.state = 'won';
+          overlay.showResult('won', {
+            kills: director.killCount,
+            timeText: elapsedText(game.startTime),
+            objectiveDesc: obj.description,
+          });
+          log.info('game won', { kills: director.killCount, level: obj.type });
+        } else if (obj.failed || director.playerDead) {
+          game.state = 'lost';
+          // 失败原因区分:敌方占领(capture) / 玩家坦克被毁(destroyed),文案不同
+          const reason: 'destroyed' | 'capture' = obj.failed ? 'capture' : 'destroyed';
+          overlay.showResult('lost', {
+            kills: director.killCount,
+            timeText: elapsedText(game.startTime),
+            objectiveDesc: obj.description,
+            reason,
+          });
+          log.info('game lost', { kills: director.killCount, reason });
+        }
+      }
+    }
 
     frame++;
     // 周期诊断日志仅在调试模式输出(关闭时连计算都省)
-    if (isDebug() && frame % 30 === 0) {
+    if (isDebug() && playing && frame % 30 === 0) {
       const t = activeTank.body.translation();
       const v = activeTank.body.linvel();
       const aim = controller.aimInfo;
@@ -422,6 +531,8 @@ function startLoop(
         expl: w.explosions,
         ammo: `${weapon.getAmmo()}/${weapon.getMaxAmmo()}`,
         supply: `${resupply.stats.activePoints}/${resupply.stats.points}`,
+        kill: director.killCount,
+        posture: director.posture,
         intact: d.intact,
         frags: d.fragments,
         bricks: d.bricks,

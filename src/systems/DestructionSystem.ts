@@ -127,6 +127,15 @@ export class DestructionSystem {
   }
 
   /**
+   * 动态注册一辆坦克(导演 spawn 新 NPC 时调用)。
+   * controllableTanks 是共享引用(director.allTanks 同一数组),push 后已自动包含,
+   * 此处只补 collider→tank 映射,让新 NPC 接入撞击判定(handleCollision)。
+   */
+  registerTank(tank: IControllableTank): void {
+    this.tankByCollider.set(tank.colliderHandle, tank);
+  }
+
+  /**
    * 注册当前玩家活性坦克(simulateStaticHit 定位用)。由 main 切换后调用。
    * 注:撞击破坏判定已改用 tankByCollider(任意坦克参与即触发),不再依赖单一活性坦克。
    */
