@@ -81,9 +81,10 @@ export class TankController {
   applyDrive(input: InputState): void {
     if (this.tank.state !== 'intact') return; // 被击毁:停止驾驶
     const cfg = this.tank.driveConfig;
+    const st = this.tank.status; // 状态聚合层(履带 debuff 降速 / 引擎过载加速,乘法叠加)
     const reverseMul = input.forward < 0 ? cfg.reverseScale : 1;
-    const targetLin = input.forward * cfg.moveSpeed * reverseMul;
-    const targetTurn = input.turn * cfg.turnSpeed;
+    const targetLin = input.forward * cfg.moveSpeed * reverseMul * st.moveScale;
+    const targetTurn = input.turn * cfg.turnSpeed * st.turnScale;
 
     this.curLin = lerp(this.curLin, targetLin, cfg.accelLerp);
     this.curTurn = lerp(this.curTurn, targetTurn, cfg.accelLerp);
@@ -116,8 +117,8 @@ export class TankController {
       return;
     }
 
-    // 炮塔水平旋转（Q/W）：角速度 lerp 实现惯性
-    const omegaTarget = input.turretDir * cfg.turret.turnSpeed;
+    // 炮塔水平旋转（Q/W）：角速度 lerp 实现惯性；状态层 turretScale 调整转速(炮塔被命中降速)
+    const omegaTarget = input.turretDir * cfg.turret.turnSpeed * this.tank.status.turretScale;
     this.turretOmega = lerp(this.turretOmega, omegaTarget, cfg.turret.omegaLerp);
     this.turretAngle = wrapAngle(this.turretAngle + this.turretOmega * dt);
     this.tank.turret.rotation.y = this.turretAngle;

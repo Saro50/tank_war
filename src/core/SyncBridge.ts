@@ -28,12 +28,17 @@ const _pos = new Vector3();
 const _quat = new Quaternion();
 
 export const SyncBridge = {
-  /** 绑定：一个刚体对应一个渲染网格 */
+  /** 绑定：一个刚体对应一个渲染网格。
+   *  建立映射后立即同步一次位姿(syncOne)——防动态生成实体(NPC 补充生成/击毁碎片)
+   *  在首帧 render 时 mesh 仍停留在世界原点 (0,0,0) 造成"闪现"。
+   *  (spawn 在 director.update 内、即本帧 sync() 之后执行,若不立即对齐,
+   *   要等下一帧 sync() 才会把 mesh 搬到 body 真实位置,中间一帧渲染错位。) */
   bind(body: RAPIER.RigidBody, obj: Object3D): void {
     if (registry.has(body)) {
       log.warn('bind: body already bound, overwriting');
     }
     registry.set(body, obj);
+    this.syncOne(body);
   },
 
   /** 解绑：销毁实体前必须调用，防止悬空引用 */
@@ -51,15 +56,26 @@ export const SyncBridge = {
     return registry.size;
   },
 
-  /** 每帧同步：把所有绑定刚体的位姿写入网格 */
+  /**
+   * 同步单个绑定:立即把 body 的位姿写入其 mesh。
+   * ------------------------------------------------------------
+   * bind 时自动调用(防动态生成实体首帧原点闪烁);
+   * 也可独立调用以强制刷新单个实体的视觉位姿(调试/特殊场景用)。
+   * body 未绑定则空转(防御,不抛异常——bind 前调用是合法的"预演"场景)。
+   */
+  syncOne(body: RAPIER.RigidBody): void {
+    const obj = registry.get(body);
+    if (!obj) return;
+    const t = body.translation();
+    const r = body.rotation();
+    _pos.set(t.x, t.y, t.z);
+    _quat.set(r.x, r.y, r.z, r.w);
+    obj.position.copy(_pos);
+    obj.quaternion.copy(_quat);
+  },
+
+  /** 每帧同步：遍历所有绑定调用 syncOne(复用单对同步逻辑,DRY) */
   sync(): void {
-    for (const [body, obj] of registry) {
-      const t = body.translation();
-      const r = body.rotation();
-      _pos.set(t.x, t.y, t.z);
-      _quat.set(r.x, r.y, r.z, r.w);
-      obj.position.copy(_pos);
-      obj.quaternion.copy(_quat);
-    }
+    for (const body of registry.keys()) this.syncOne(body);
   },
 };

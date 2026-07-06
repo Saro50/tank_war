@@ -1,3 +1,22 @@
+import { t14, tiger as tigerVisual, abrams as abramsVisual } from './data/tankVisuals';
+
+/**
+ * 弹种标识(联合类型,全代码共用)。
+ * ------------------------------------------------------------
+ *  ap: 穿甲弹 —— 直击高伤、穿透装甲、对建筑弱、无溅射。打坦克主弹种。
+ *  he: 高爆弹 —— AOE 溅射、对建筑强、对装甲弱。清建筑 / 盲区压制。
+ * 详见 docs/combat-layer-design.md §2。
+ */
+export type AmmoType = 'ap' | 'he';
+
+/**
+ * NPC 难度档位(rookie 新兵 / regular 老兵 / veteran 精英)。
+ * ------------------------------------------------------------
+ * 跨 AI(NpcController.profile 决策参数)/ 实体外观(tierVisuals 配色+标识)/
+ * director(spawn 分配)共用,故定义在 config 共享层,避免 entities→ai 循环依赖。
+ */
+export type NpcTier = 'rookie' | 'regular' | 'veteran';
+
 /**
  * 全局参数集中地
  * ============================================================
@@ -58,112 +77,33 @@ export const CONFIG = {
     accelLerp: 0.15,
     reverseScale: 0.6,
 
-    /** 梯形车身(视觉)：上窄下宽，底宽>履带外缘以遮挡履带 */
-    hull: {
-      bottomHalfX: 1.06, // 底宽半(略<履带外缘1.15，让履带外侧面外露可见链节滚动)
-      topHalfX: 0.9, // 顶宽半(X 方向收窄)
-      bottomHalfZ: 2.15, // 底长半(接地满长，适配 7 对负重轮)
-      topHalfZ: 1.65, // 顶长半(Z 收窄 → 前后楔形斜下，规避炮管下俯穿模)
-      height: 1.05,
-      centerY: -0.05, // 车身下沉，座于两履带之间
-    },
+    /** 梯形车身(视觉):上窄下宽(数据由 data/tankVisuals t14.hull 驱动) */
+    hull: t14.hull,
 
-    /** 履带(视觉)：左右各一，胶囊形(直段box+两端圆柱)，独立纹理滚动 */
-    track: {
-      halfX: 0.27, // 厚度半(x)
-      halfY: 0.3, // 高度半(y) = 两端圆柱半径
-      halfZ: 2.05, // T-14 总长半(含两端圆弧，适配 7 对轮)
-      offsetX: 0.88, // 左右履带中心 x(±)，外缘 0.88+0.27=1.15 < 车身底宽 1.25
-      centerY: -0.48, // 履带中心 y(底部接地)
-      texRepeat: 6, // 纹理沿长度重复(链节组数)
-      rollScale: 1.0, // 滚动视觉放大系数
-    },
+    /** 履带(视觉):左右各一,胶囊形直段+两端圆柱,独立纹理滚动 */
+    track: t14.track,
 
-    /** 负重轮(写实：每侧多排小轮露在履带内侧，最影响"像不像坦克") */
-    roadWheel: {
-      count: 7, // T-14 每侧 7 对负重轮(辨识特征)
-      radius: 0.22, // 轮半径(<履带主动轮0.3，形成主动轮更大的层次)
-      halfWidth: 0.1, // 轮厚半(x)
-      offsetX: 0.66, // 轮中心 x(在履带内侧，<履带offsetX0.88)
-      centerY: -0.48, // 与履带中心同高(接地)
-      zSpan: 1.6, // T-14 轮组前后分布半长(7 对轮更长)
-    },
+    /** 负重轮(视觉):每侧多排小轮露在履带内侧 */
+    roadWheel: t14.roadWheel,
 
-    /** 挡泥板(履带上方薄板，写实坦克标志，遮住履带上半圈) */
-    fender: {
-      halfX: 0.16, // 板宽半(覆盖到履带外缘)
-      halfY: 0.025, // 板厚半(薄板)
-      halfZ: 2.1, // 板长半(略长于履带，T-14 加长)
-      offsetX: 0.88, // 与履带 x 对齐
-      centerY: -0.16, // 在履带上方
-    },
+    /** 挡泥板(视觉):履带上方薄板,遮住履带上半圈 */
+    fender: t14.fender,
 
-    /** 炮塔(键盘 U/I 控制左右旋转) */
+    /** 炮塔(键盘 U/I 控制左右旋转;外形数据由 data/tankVisuals t14.turret 驱动) */
     turret: {
-      offset: { x: 0, y: 0.48, z: -0.3 },
       turnSpeed: 1.3, // rad/s
       /** 旋转惯性：角速度 lerp 系数(越小越迟钝、滑转越久；C 阶段) */
       omegaLerp: 0.12,
-      /**
-       * T-14 无人炮塔(扁平方形主体 + 传感器柱 + 遥控机枪)
-       * 取代传统圆筒炮塔 + 指挥塔，是 T-14 一眼识别的核心
-       */
-      armata: {
-        // 楔形炮塔(参考实物图)：顶窄底宽 + 顶短底长 → 正面装甲内倾的楔形轮廓
-        bottomHalfX: 0.88, topHalfX: 0.6, // 底宽/顶宽半(顶收窄→正面楔形)
-        bottomHalfZ: 1.05, topHalfZ: 0.85, // 底长/顶长半(顶面整体小一圈)
-        halfY: 0.26, // 高半(扁平，仅传统炮塔~60%)
-        offsetY: 0.3, // 中心相对炮塔基座的 y
-        /** 车长全景瞄准镜(后部较大柱状方块) */
-        sightCmdr: { half: { x: 0.2, y: 0.13, z: 0.16 }, offset: { x: 0, y: 0.46, z: -0.4 } },
-        /** 炮长瞄准镜(前部偏右小柱状) */
-        sightGunner: { half: { x: 0.13, y: 0.11, z: 0.12 }, offset: { x: 0.28, y: 0.42, z: 0.3 } },
-        /** 遥控机枪 RCWS(右前方，含枪管) */
-        rcws: { half: { x: 0.16, y: 0.09, z: 0.16 }, offset: { x: 0.42, y: 0.42, z: 0.05 }, barrelLen: 0.5, barrelRadius: 0.022 },
-      },
-      /** "阿富汗石"主动防御系统发射管(炮塔两侧小柱，T-14 标志) */
-      afghanit: {
-        radius: 0.045, height: 0.16,
-        count: 5, // 每侧数量
-        offsetX: 0.88, // 炮塔侧面 x(贴方形炮塔外侧)
-        zSpan: 0.7, // 沿 z 分布范围
-        offsetY: 0.2,
-      },
-      /**
-       * 通讯天线(挂炮塔后部 → 随炮塔旋转，永远在炮管反方向，规避炮管穿模)
-       * 坐标为炮塔局部：炮管指向 +z，故天线放在 -z 后部
-       */
-      antenna: {
-        radius: 0.014, length: 1.0, // 炮塔顶天线
-        baseX: 0.6, // T-14 炮塔右后(避开 RCWS x=0.42)
-        baseY: 0.42, // 方形炮塔顶面附近(顶面 y≈0.56)
-        baseZ: -0.7, // 炮塔后部(炮管 +z 的反方向)
-        tilt: 0.3, // 后倾角(rad)
-      },
+      // 视觉部分(offset/armata/afghanit/antenna)从视觉数据合并
+      ...t14.turret,
     },
 
-    /** 炮管(键盘 O/P 控制抬起放下) */
+    /** 炮管(键盘 O/P 控制抬起放下;外形数据由 data/tankVisuals t14.barrel 驱动) */
     barrel: {
-      offset: { x: 0, y: 0.28, z: 0.4 },
-      length: 1.9,
       pitchRange: { min: -0.32, max: 0.2 }, // rad: [最大下俯, 最大上仰]
       pitchSpeed: 0.9, // rad/s
-      /** 炮盾(炮管根部加厚块，连接炮塔与炮管，写实坦克必备) */
-      mantlet: {
-        radius: 0.2, // 比炮管0.11粗，视觉上"鼓"出来
-        halfZ: 0.18, // 厚度半
-      },
-      /** 炮管中段抽烟器(T-14 的 2A82，位于炮管中部偏前) */
-      fumeExtractor: {
-        radius: 0.15, // 比炮管0.11略粗
-        length: 0.4, // 抽烟器长度
-        posRatio: 0.66, // 沿炮管位置比例(0=根部,1=炮口)，距炮口约1/3
-      },
-      /** 炮口装置(消焰器，炮口端小粗段，参考实物图) */
-      muzzleDevice: {
-        radius: 0.13, // 略粗于炮管0.11
-        length: 0.18,
-      },
+      // 视觉部分(offset/length/mantlet/fumeExtractor/muzzleDevice)从视觉数据合并
+      ...t14.barrel,
     },
 
     /** 第三人称相机：偏移随车身 yaw 旋转，始终在车尾后方看车头 */
@@ -191,40 +131,14 @@ export const CONFIG = {
       color: 0x8a7a52, // 土黄
     },
 
-    /** 车体附件(写实细节，提升"装备感") */
-    stowage: {
-      /** 发动机舱格栅(车尾散热条) */
-      engineGrille: {
-        count: 5, halfX: 0.5, halfY: 0.16, halfThick: 0.018,
-        z: -2.1, y: 0.0, // T-14 车体加长，后移
-      },
-      /** 驾驶员舱盖(车体前部顶上凸起，T-14 乘员舱在前) */
-      driverHatch: { radius: 0.22, height: 0.1, x: 0, z: 1.5, y: 0.5 },
-    },
+    /** 车体附件(视觉):发动机舱格栅+驾驶员舱盖 */
+    stowage: t14.stowage,
 
     /**
-     * 写实军事风配色板(B 阶段迷彩将在此基础上叠纹理)
+     * 写实军事风配色板(数据由 data/tankVisuals t14.colors 驱动)
      * 分材质 PBR：漆面哑光 / 金属高反射 / 橡胶全哑光
      */
-    colors: {
-      hull: 0x4a5535, // T-14 俄军橄榄绿(偏黄绿，哑光漆面)
-      turret: 0x434d30, // 炮塔略深一档
-      /** 程序迷彩色板(俄军绿系：绿底 + 深褐斑块 + 暗绿斑块) */
-      camo: {
-        base: 0x4a5535, // 底色俄军绿
-        blobDark: 0x2a2e18, // 深黑褐斑块
-        blobMid: 0x38401e, // 暗绿斑块
-      },
-      /** 炮塔战术编号贴花文字 */
-      number: '03',
-      trackMetal: 0x2a2d33, // 履带深铁灰(金属)
-      wheelRubber: 0x1a1c1f, // 负重轮橡胶黑(全哑光)
-      wheelHub: 0x3a3d42, // 轮毂金属中灰
-      barrel: 0x33373d, // 炮管枪铁灰(金属)
-      mantlet: 0x2e3137, // 炮盾深灰铸铁
-      detail: 0x141619, // 天线/格栅等黑色细节
-      fender: 0x4a5424, // 挡泥板(同车身略暗，区分层次)
-    },
+    colors: t14.colors,
 
     /** 损坏系统(玩家坦克被击:HP 机制,与静态坦克同名参数语义一致,便于未来统一) */
     damage: {
@@ -248,18 +162,53 @@ export const CONFIG = {
    *  destruction:{ ... 破坏冲量阈值、Voronoi 碎片数、碎片淡出时间 }
    */
 
-  /** 武器/开火（M3） */
+  /** 武器/开火（M3 + 弹药种类增强）
+   *  ------------------------------------------------------------
+   *  弹药分两种(详见 docs/combat-layer-design.md §2):
+   *   - AP 穿甲弹:直击高伤、穿透装甲、对建筑弱、无溅射 → 走 DestructionSystem.applyDirectHit 直击管线。
+   *   - HE 高爆弹:AOE 溅射、对建筑强、对装甲弱        → 走 DestructionSystem.onExplosion(AOE,复用现有)。
+   *  两种弹各自独立库存(见 ammo.maxByType),按 1/2 键切换,切换不消耗不冷却。 */
   weapon: {
-    /** 炮弹 */
-    projectile: {
-      radius: 0.13,
-      mass: 2.5,
-      /** 初速度(m/s) */
-      muzzleVelocity: 60,
-      /** 最长存活(s)，超时销毁防丢失 */
-      maxLifetime: 6,
+    /** 各弹种参数(替代原单一 projectile) */
+    ammoTypes: {
+      /** AP 穿甲弹:精准点杀坦克主弹种 */
+      ap: {
+        /** 直击伤害倍率(相对基础 hitDamage)——AP 打坦克更强 */
+        damageMultiplier: 1.5,
+        /** 装甲穿透:方向装甲倍率 ×(1 − 此值),即削弱 20% 装甲加成 */
+        armorPenetration: 0.2,
+        /** 对建筑/可破坏物伤害倍率——AP 打建筑弱(穿甲不爆) */
+        destructibleMultiplier: 0.4,
+        /** 弹体物理参数 */
+        radius: 0.13,
+        mass: 3.5,
+        /** 初速度(m/s) */
+        muzzleVelocity: 70,
+        /** 最长存活(s)，超时销毁防丢失 */
+        maxLifetime: 6,
+        /** 弹体颜色(暗色,尖头穿甲感) */
+        color: 0x1c1e22,
+      },
+      /** HE 高爆弹:清建筑 / 盲区压制 / 打集群 */
+      he: {
+        /** 直击伤害倍率——HE 直接命中也不算高(主要靠溅射) */
+        damageMultiplier: 0.7,
+        /** 爆炸半径倍率(相对基础 explosionRadius)——HE 溅射更大 */
+        explosionRadiusMultiplier: 1.6,
+        /** 对建筑/可破坏物伤害倍率——HE 清建筑强 */
+        destructibleMultiplier: 1.5,
+        /** 弹体物理参数 */
+        radius: 0.15,
+        mass: 2.5,
+        /** 初速度(m/s) */
+        muzzleVelocity: 60,
+        /** 最长存活(s)，超时销毁防丢失 */
+        maxLifetime: 6,
+        /** 弹体颜色(橄榄色,圆钝高爆感) */
+        color: 0x3a4a2a,
+      },
     },
-    /** 开火冷却(s)：连发最小间隔 */
+    /** 开火冷却(s)：连发最小间隔(不区分弹种) */
     fireCooldown: 0.55,
     /** 后坐力(三层叠加) */
     recoil: {
@@ -297,17 +246,100 @@ export const CONFIG = {
 
   /** 弹药补给(M5:炮弹总量限制 + 资源点装填)
    * ------------------------------------------------------------
-   * 所有坦克统一:开火消耗弹药,归零禁射;驶入补给点半径内自动持续装填。
-   * 逼玩家管理弹药、回补给点,打破"无限倾泻"的单调节奏。 */
+    * 所有坦克统一:开火消耗弹药,归零禁射;驶入补给点半径内自动持续装填。
+    * 逼玩家管理弹药、回补给点,打破"无限倾泻"的单调节奏。
+    * 弹药种类增强后:AP/HE 各自独立库存,补给点同时补两种(各自到顶)。 */
   ammo: {
-    /** 每辆坦克炮弹上限(玩家/NPC 统一)。约够 16s 连射,够一场交战但有上限。 */
-    maxAmmo: 30,
-    /** 补给点装填速率(发/秒):30 发约 3.75s 补满。不能瞬补(防战斗中滥用)。 */
-    resupplyRate: 8,
+    /** 各弹种上限(玩家/NPC 统一)。AP 18 + HE 12,够一场交战但有上限,鼓励按需选弹。 */
+    maxByType: { ap: 18, he: 12 },
+    /** 各弹种装填速率(发/秒,同时补)。不能瞬补(防战斗中滥用)。 */
+    resupplyRate: { ap: 5, he: 4 },
     /** 补给点装填半径(m):坦克驶入此半径即开始装填。 */
     resupplyRadius: 5,
-    /** NPC 弹药≤此值时主动前往补给点(留余量防路上无还手之力)。 */
+    /** NPC 当前选弹≤此值时主动前往补给点(留余量防路上无还手之力)。 */
     npcResupplyThreshold: 5,
+  },
+
+  /** 战斗层增强参数(部位 debuff / 主动技能,详见 docs/combat-layer-design.md)
+   *  ------------------------------------------------------------
+   *  集中管理 M2(弱点部位)与 M3(主动技能)的可调参数,与 destruction(基础伤害)解耦。 */
+  combat: {
+    /** 弱点部位 debuff(临时,到期恢复;用户原则"用结果反馈而非操作限制")
+     *  AP 直击命中部位 collider 时注入对应 debuff 到 tank.status(M0 状态层聚合)。 */
+    parts: {
+      /** 炮塔命中:炮塔转速 ×0.4 持续 8s(对手准星跟不上,玩家绕侧窗口) */
+      turret: { scale: 0.4, duration: 8 },
+      /** 履带命中:机动(移动+转向)×0.5 持续 8s(大幅减速但仍可缓慢机动,给玩家 retreat/找掩体/去补给的空间) */
+      track: { scale: 0.5, duration: 8 },
+    },
+
+    /** 主动技能(M3):玩家始终拥有;veteran NPC 也拥有(rookie/regular 无,平衡性)。
+     *  激活时给 tank.status 注入对应 effect(M0 状态层统一聚合)。
+     *  三个技能覆盖 续航/机动/防御 三维,玩家须选此刻最缺的——这才是"选择"。 */
+    skills: {
+      /** 应急维修:站桩 3s 回 30HP。战斗中乱用=送死(站桩期间被集火),残血脱战翻盘用。
+       *  施法期间速度超 castMaxSpeed 则中断(防移动滥用,已回血保留)。 */
+      repair: {
+        cooldown: 20,
+        duration: 3,
+        healTotal: 30,
+        /** 施法最大速度(m/s):超此视为移动中断维修 */
+        castMaxSpeed: 1.5,
+      },
+      /** 引擎过载:4s 内机动 ×1.5/×1.3。冲锋/抢点/逃命。 */
+      boost: { cooldown: 15, duration: 4, moveScale: 1.5, turnScale: 1.3 },
+      /** 装甲倾斜:5s 内受击伤害 ×0.6(damageReduction)。顶上去硬换的关键窗口。 */
+      armor: { cooldown: 18, duration: 5, damageReduction: 0.6 },
+    },
+
+    /** veteran NPC 技能决策参数(M3):rookie/regular 不持有技能,仅 veteran 按 these 规则触发。
+     *  NPC 复用玩家 SkillSystem 接口(每辆 NPC 独立实例,独立冷却)。 */
+    npcSkill: {
+      /** 维修触发血量比:HP 低于此且脱战(无视线/远)才修,避免战斗中送死 */
+      repairHpRatio: 0.4,
+      /** 装甲倾斜触发血量比:HP 低于此且正交战时硬换 */
+      armorHpRatio: 0.6,
+      /** 引擎过载触发距离比(相对 fireRange):目标远需逼近冲锋,或残血逃跑 */
+      boostDistRatio: 1.2,
+    },
+
+    /** NPC 难度外观映射(配色 + 军衔标识,让玩家一眼识别敌方难度)。
+     *  ------------------------------------------------------------
+     *  远距离靠配色(黑色剪影=精英),近距离靠炮塔后部军衔贴花。
+     *  - rookie:  原配色不动(量产动员兵感)
+     *  - regular: 原色 darken + 磨损加重(暗沉老兵感)+ 双道 V 杠
+     *  - veteran: 黑灰系覆盖 + 高磨损(肃杀精锐感,远距离黑色剪影醒目)+ 暗红骷髅
+     *  darken/wearBoost 基于"原配色"派生(tiger 灰绿、abrams 沙黄各自加深);
+     *  camoOverride 用绝对值覆盖(veteran 两车型统一变黑,强化"精英=黑色"心智)。 */
+    tierVisuals: {
+      /** 新兵:原配色,无标识 */
+      rookie: {},
+      /** 老兵:原色整体变暗 + 重磨损,炮塔橙金双道 V 杠 */
+      regular: {
+        /** 原色整体变暗系数(×0.72),模拟老旧/战损车 */
+        darken: 0.72,
+        /** 磨损叠加(原 wear + 此值,clamp 1),加重做旧 */
+        wearBoost: 0.15,
+        /** 军衔标识:双道 V 杠(士官) */
+        rank: 'chevron',
+        /** 标识颜色(橙金) */
+        rankColor: 0xd8a23a,
+      },
+      /** 精英:黑灰系绝对覆盖 + 暗红骷髅,两车型统一变黑 */
+      veteran: {
+        /** 黑灰系绝对覆盖(tiger/abrams 都变黑) */
+        camoOverride: {
+          base: 0x2a2a2a, // 深灰主色
+          blobDark: 0x141414, // 近黑斑块
+          blobMid: 0x4a4a4a, // 中灰斑块
+          wear: 0.7, // 高磨损(肃杀)
+        },
+        /** 军衔标识:骷髅(特种精锐/死神头) */
+        rank: 'skull',
+        /** 标识颜色(暗红,危险信号) */
+        rankColor: 0xc0392b,
+      },
+    },
   },
 
   /** 破坏系统（M4） */
@@ -400,56 +432,9 @@ export const CONFIG = {
     destroyExplosionScale: 4,
     /** 击毁浓烟的尺寸缩放(相对受伤小烟):1.6=烟更浓更密更持久,挡住视线后再散去露出焦黑车体 */
     destroySmokeScale: 1.6,
-    /** 德国虎式坦克(二战)：垂直方盒装甲、长车身、长88mm炮、德军迷彩 */
+    /** 德国虎式坦克(外形数据由 data/tankVisuals tiger 驱动) */
     tiger: {
-      // 车身:垂直方盒装甲(写实虎式),加厚(高 1.3)显得敦实厚重有分量;
-      // 整体按比例缩小到与玩家 T-14 接近(全长≈4.8m < 原 5.8m),不再明显大于玩家。
-      hull: {
-        bottomHalfX: 1.18, topHalfX: 1.18, // 略加宽(厚重感),垂直装甲
-        bottomHalfZ: 2.4, topHalfZ: 2.4, // 长度缩(原2.9)
-        height: 1.3, centerY: 0.9, // 再加厚(1.15→1.3)+ 上移,座于履带间更敦实厚重
-        /** 车首下斜板(三角楔:后缘贴车体前端、斜面从前顶下倾到前底,无悬空) */
-        frontSlope: { halfX: 1.18, halfDepth: 0.5, halfHeight: 0.65, x: 0, y: 0.9, z: 2.9 },
-      },
-      track: { halfX: 0.28, halfY: 0.3, halfZ: 2.4, offsetX: 1.18, centerY: 0.45, texRepeat: 12 },
-      roadWheel: { count: 8, radius: 0.3, halfWidth: 0.16, offsetX: 1.18, centerY: 0.45, zSpan: 2.1 },
-      /** 交错式负重轮(虎式标志)：内排轮偏移半距,视觉上呈交错排列 */
-      roadWheelStagger: { radius: 0.26, halfWidth: 0.16, offsetX: 1.05, centerY: 0.45, zSpan: 2.1, zHalfStep: true },
-      fender: { halfX: 0.24, halfY: 0.05, halfZ: 2.45, offsetX: 1.36, centerY: 1.05 },
-      /** 侧裙板(虎式 Schürzen 护板:仅遮履带顶端,露出交错轮组的标志造型) */
-      sideSkirt: { halfX: 0.05, halfY: 0.18, halfZ: 2.2, offsetX: 1.42, centerY: 0.78 },
-      turret: {
-        offset: { x: 0, y: 1.55, z: -0.3 }, // 炮塔随加厚车体上移(1.36→1.55),坐稳车顶
-        // 炮塔主体:前后非对称楔形(正面厚、后部急剧收薄 → 真楔形,非对称截头锥)
-        // frontHalfZ 大=正面装甲厚、近乎垂直;backHalfZ 小=向后收薄成尖锐楔尾
-        body: { bottomHalfX: 0.78, topHalfX: 0.6, bottomHalfZ: 1.05, topHalfZ: 0.85, frontHalfZ: 0.85, backHalfZ: 0.45, height: 0.6, centerY: 0.3 },
-        /** 车长指挥塔(炮塔顶圆柱,虎式标志) */
-        cupola: { radius: 0.22, height: 0.2, x: 0, y: 0.7, z: -0.5 },
-        /** 无独立周视瞄准镜(二战坦克无此装置) */
-        sight: undefined,
-        /** 无装填手舱盖配置 */
-        loaderHatch: undefined,
-        /** 炮塔后部战斗室加宽段(与主体同宽,后延加厚 → H 形后部,H 形平面) */
-        bustle: { halfX: 0.78, halfY: 0.22, halfZ: 0.3, x: 0, y: 0.32, z: -1.15 },
-        /** 前脸厚防盾(88mm 炮根处加厚块,模拟虎式弧形防盾,避免前脸平板) */
-        frontShield: { halfX: 0.42, halfY: 0.32, halfZ: 0.18, x: 0, y: 0.32, z: 1.0 },
-      },
-      barrel: { offset: { x: 0, y: 0.25, z: 0.5 }, length: 3.0, radius: 0.09 }, // 88mm 长炮(随车身缩)
-      /** 炮口制退器(88mm 双室制退器,虎式标志) */
-      muzzleBrake: { radius: 0.13, length: 0.4 },
-      /** 无热护套(二战坦克用炮口制退器,不用热护套) */
-      thermalSleeve: undefined,
-      /** 炮盾(炮管根部加厚,防盾) */
-      mantlet: { radius: 0.17, halfZ: 0.32 },
-      colors: {
-        hull: 0x6b6a55, turret: 0x6b6a55,
-        camo: { base: 0x6b6a55, blobDark: 0x4a4a35, blobMid: 0x8a7d4a }, // 德军灰绿+褐黄
-        trackMetal: 0x333333, wheelRubber: 0x1a1a1a, wheelHub: 0x555555,
-        barrel: 0x4a4a35, detail: 0x2a2a20, fender: 0x5a5a45,
-      },
-      number: '231',
-      /** 贴花:德军黑十字(Balkenkreuz)贴炮塔两侧 */
-      decal: { cross: true, crossColor: 0x1a1a1a },
+      ...tigerVisual,
       maxHp: 40, // 重装甲但游戏化:3~4 发可毁(原 200 太高体感无反应)
       /** 调试附身模式用的运行参数(履带位置/相机偏移适配更大车身) */
       debugDrive: {
@@ -459,66 +444,9 @@ export const CONFIG = {
         cameraLookOffset: { x: 0, y: 1.6, z: 7 },
       },
     },
-    /** M1 艾布拉姆斯(现代主战)：倾斜复合装甲、楔形炮塔、7对大负重轮、沙漠迷彩 */
+    /** M1 艾布拉姆斯(外形数据由 data/tankVisuals abrams 驱动) */
     abrams: {
-      hull: {
-        bottomHalfX: 1.35, topHalfX: 1.15, // 略加宽(厚重感)
-        bottomHalfZ: 2.6, topHalfZ: 2.4,
-        height: 1.0, centerY: 0.85, // 加厚(原0.75→1.0)+上移,座于履带间更敦实厚重
-        /** 车首驾驶舱凸起(M1 前上装甲板上的驾驶舱,标志性前凸) */
-        frontHatch: { halfX: 0.4, halfY: 0.22, halfZ: 0.45, x: 0, y: 1.3, z: 1.6 },
-        /** 车首下斜板(三角楔:M1 标志性大倾角 lower glacis,后缘贴车体前端、斜面前伸接地) */
-        frontSlope: { halfX: 1.35, halfDepth: 0.45, halfHeight: 0.5, x: 0, y: 0.85, z: 3.05 },
-      },
-      track: { halfX: 0.32, halfY: 0.32, halfZ: 2.6, offsetX: 1.35, centerY: 0.4, texRepeat: 13 },
-      roadWheel: { count: 7, radius: 0.36, halfWidth: 0.2, offsetX: 1.35, centerY: 0.4, zSpan: 2.2 },
-      /** 托带轮(M1 履带上方回程支撑轮,现代坦克标志,4-6 个小轮) */
-      returnRoller: { radius: 0.12, halfWidth: 0.1, offsetX: 1.32, centerY: 0.72, count: 5, zSpan: 1.6 },
-      /** 前主动轮带齿、后诱导轮实心盘(M1 履带端轮差异化) */
-      toothedSprocket: true,
-      /** 无交错轮(现代坦克用扭杆悬挂均匀排列) */
-      roadWheelStagger: undefined,
-      fender: { halfX: 0.28, halfY: 0.05, halfZ: 2.65, offsetX: 1.55, centerY: 0.82 },
-      /** 侧裙板(M1 标志:只遮履带上半,露出下排大负重轮,现代坦克特征) */
-      sideSkirt: { halfX: 0.06, halfY: 0.26, halfZ: 2.3, offsetX: 1.62, centerY: 0.72 },
-      turret: {
-        offset: { x: 0, y: 1.35, z: 0.1 }, // 炮塔随加厚车体上移(原1.0→1.35),坐稳车顶
-        // 炮塔主体:前后非对称楔形(正面厚装甲、后部收薄成楔尾,M1 炮塔本质前厚后薄)
-        body: { bottomHalfX: 0.95, topHalfX: 0.68, bottomHalfZ: 1.1, topHalfZ: 0.85, frontHalfZ: 0.85, backHalfZ: 0.4, height: 0.7, centerY: 0.35 },
-        /** 车长指挥塔(M1 车长独立周视镜,右后) */
-        cupola: { radius: 0.22, height: 0.24, x: 0.35, y: 0.78, z: -0.25 },
-        /** 车长瞄准镜(前部柱状,独立周视镜) */
-        sight: { halfX: 0.13, halfY: 0.2, halfZ: 0.13, x: 0.32, y: 0.82, z: 0.28 },
-        /** 装填手舱盖(左侧不对称,M1 标志) */
-        loaderHatch: { radius: 0.22, height: 0.12, x: -0.35, y: 0.78, z: 0.0 },
-        /** 炮塔尾部储物篮(后部楔尾处,扁平篮筐) */
-        bustle: { halfX: 0.68, halfY: 0.28, halfZ: 0.4, x: 0, y: 0.42, z: -1.1 },
-        /** 无独立前脸防盾块(楔形炮塔本身够锐) */
-        frontShield: undefined,
-        /** 车长机枪站(M1 炮塔顶 12.7mm 机枪:底座+枪管,装填手位) */
-        mgStation: {
-          baseHalf: { x: 0.16, y: 0.1, z: 0.18 },
-          base: { x: -0.35, y: 0.95, z: -0.1 },
-          barrelRadius: 0.025, barrelLen: 0.7,
-          barrel: { x: -0.35, y: 1.1, z: 0.15 },
-        },
-      },
-      barrel: { offset: { x: 0, y: 0.3, z: 0.55 }, length: 2.9, radius: 0.1 }, // M256 120mm,热护套粗
-      /** 无炮口制退器(M256 用热护套不用制退器) */
-      muzzleBrake: undefined,
-      /** 热护套(炮管中段分段加粗,防热变形,现代坦克标志) */
-      thermalSleeve: { radius: 0.14, length: 1.6, posRatio: 0.45 },
-      /** 炮盾(炮管根部加厚防盾) */
-      mantlet: { radius: 0.2, halfZ: 0.4 },
-      colors: {
-        hull: 0xb5a06a, turret: 0xb5a06a,
-        camo: { base: 0xb5a06a, blobDark: 0x8a7445, blobMid: 0xd4c089 }, // 沙漠黄三色
-        trackMetal: 0x333333, wheelRubber: 0x1a1a1a, wheelHub: 0x555555,
-        barrel: 0x8a7445, detail: 0x3a3520, fender: 0xa08a55,
-      },
-      number: 'A11',
-      /** 贴花:战术编号(无十字,美军风格) */
-      decal: { cross: false, crossColor: 0x1a1a1a },
+      ...abramsVisual,
       maxHp: 30, // 贫铀复合装甲但游戏化:2~3 发可毁(原 160 太高体感无反应)
       /** 调试附身模式用的运行参数(履带位置/相机偏移适配更大车身) */
       debugDrive: {

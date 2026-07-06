@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { BoxGeometry, ConeGeometry, Mesh, MeshStandardMaterial } from 'three';
-import { CONFIG } from './config';
+import { CONFIG, type NpcTier } from './config';
 import { PhysicsWorld } from './core/PhysicsWorld';
 import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
@@ -15,6 +15,8 @@ import { DestructionSystem } from './systems/DestructionSystem';
 import { DirectorSystem } from './systems/DirectorSystem';
 import { ResupplySystem } from './systems/ResupplySystem';
 import { CaptureSystem } from './systems/CaptureSystem';
+import { SkillSystem } from './systems/SkillSystem';
+import { DebugConsole } from './utils/DebugConsole';
 import { createObjective, type Objective, type LevelConfig } from './systems/Objective';
 import { ResupplyPoint } from './entities/ResupplyPoint';
 import { CaptureZone } from './entities/CaptureZone';
@@ -24,6 +26,7 @@ import { TuningPanel } from './ui/TuningPanel';
 import { HUD } from './ui/HUD';
 import { Logger } from './utils/Logger';
 import { initDebugFlag, isDebug } from './utils/debug';
+import { TankDataStore } from './data/TankDataStore';
 
 const log = Logger.create('main');
 
@@ -74,6 +77,10 @@ async function main(): Promise<void> {
     : undefined;
 
   const physics = await PhysicsWorld.create();
+  // 视觉数据加载(JSON + schema 校验 + 内置兜底)。
+  // 必须在 buildTanks 前:B 阶段起 TankVisualBuilder 从此取数据渲染,
+  // 数据未就绪则构建会抛错。当前 buildVisuals 仍读 CONFIG(过渡期,零回归)。
+  await TankDataStore.load();
   const render = new RenderScene(container);
   const hud = new HUD(container);
 
@@ -110,12 +117,17 @@ async function main(): Promise<void> {
   // + capture:NPC 纳入占领判定(创建/摧毁时注册/注销)。未来 LLM 接入点
   const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply, capture);
 
+  // 调试控制台:暴露 tw.spawnEnemy/tw.revive/tw.hp 到浏览器 DevTools Console,便于调试 NPC 难度/玩家状态
+  new DebugConsole(director, () => switcher.activeTank);
+
   const input = new InputSystem();
   input.attach();
 
   const controller = new TankController(switcher.activeTank, render);
   const shake = new CameraShake(render.camera);
   const weapon = new WeaponSystem(() => switcher.activeTank, physics, render, shake, destruction);
+  // M3 主动技能系统(玩家;getActiveTank 跟随 Tab 切换的活性坦克,各坦克技能状态独立)
+  const skill = new SkillSystem(() => switcher.activeTank);
 
   // 注册玩家坦克到补给系统(用 getter:Tab 切换附身坦克后,装填自动跟随新的 activeTank)
   resupply.register(() => switcher.activeTank, weapon);
@@ -169,7 +181,7 @@ async function main(): Promise<void> {
   // objective 用 getter 传入:startLoop 启动时 objective 尚未创建(选关前),
   // 用闭包读 main 的 objective 变量最新值(选关回调赋值后 loop 即可见)
   const loop = startLoop(
-    physics, render, input, switcher, controller, weapon, shake, destruction,
+    physics, render, input, switcher, controller, weapon, skill, shake, destruction,
     hud, director, resupply, capture, () => objective, overlay, game,
   );
 
@@ -313,7 +325,7 @@ function buildTanks(
     const cfg = CONFIG.tanks[i];
     let tank: IControllableTank;
     try {
-      tank = createTank(cfg.variant, physics, render, cfg.spawn, cfg.yaw);
+      tank = createTank(cfg.variant, physics, render, cfg.spawn, cfg.yaw, (cfg as { tier?: NpcTier }).tier);
     } catch (e) {
       // 未知 variant:as const 下编译期不可达,运行期兜底(永不静默失败)
       log.error('unknown tank variant, skipped', { variant: cfg.variant, index: i, err: String(e) });
@@ -400,6 +412,7 @@ function startLoop(
   switcher: TankSwitcher,
   controller: TankController,
   weapon: WeaponSystem,
+  skill: SkillSystem,
   shake: CameraShake,
   destruction: DestructionSystem,
   hud: HUD,
@@ -446,8 +459,21 @@ function startLoop(
     hud.setCrosshair(input.state.mouseX, input.state.mouseY);
     hud.update(
       activeTank,
-      { current: weapon.getAmmo(), max: weapon.getMaxAmmo(), resupplying: weapon.isResupplying() },
+      {
+        ap: weapon.getAmmoByType('ap'),
+        he: weapon.getAmmoByType('he'),
+        maxAp: weapon.getMaxByType('ap'),
+        maxHe: weapon.getMaxByType('he'),
+        selected: weapon.getSelectedAmmo(),
+        resupplying: weapon.isResupplying(),
+      },
       getObjective(),
+      [
+        // M3 技能栏数据(顺序 repair/boost/armor,与 HUD.SKILL_META 一致)
+        { id: 'repair', cdRatio: skill.cooldownRatio('repair'), active: skill.isActive('repair') },
+        { id: 'boost', cdRatio: skill.cooldownRatio('boost'), active: skill.isActive('boost') },
+        { id: 'armor', cdRatio: skill.cooldownRatio('armor'), active: skill.isActive('armor') },
+      ],
     );
     overlay.updatePosture(director.posture);
 
@@ -478,7 +504,10 @@ function startLoop(
       });
       controller.applyAim(inputState, frameTime);
       weapon.update(inputState, frameTime);
-      director.update(frameTime); // NPC step 后:aim + weapon
+      // M3 主动技能:按键边沿激活 + 推进冷却/激活(repair tick 每帧回血+速度中断检测)
+      if (inputState.skill) skill.tryActivate(inputState.skill);
+      skill.update(frameTime);
+      director.update(frameTime); // NPC step 后:aim + weapon + skill.update
       shake.update(frameTime);
       destruction.update(frameTime);
       resupply.update(frameTime); // 补给点再生 + 装填判定(M5)
@@ -529,7 +558,7 @@ function startLoop(
         barrel: `${aim.barrelDeg.toFixed(0)}°`,
         proj: w.projectiles,
         expl: w.explosions,
-        ammo: `${weapon.getAmmo()}/${weapon.getMaxAmmo()}`,
+        ammo: `AP${weapon.getAmmoByType('ap')}/HE${weapon.getAmmoByType('he')}`,
         supply: `${resupply.stats.activePoints}/${resupply.stats.points}`,
         kill: director.killCount,
         posture: director.posture,

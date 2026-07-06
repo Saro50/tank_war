@@ -2,38 +2,52 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import {
   BoxGeometry,
   CanvasTexture,
-  CylinderGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
-  Object3D,
   PlaneGeometry,
   Quaternion,
-  RepeatWrapping,
   Vector3,
 } from 'three';
-import { CONFIG } from '../../config';
+import { CONFIG, type NpcTier } from '../../config';
 import type { PhysicsWorld } from '../../core/PhysicsWorld';
 import type { RenderScene } from '../../core/RenderScene';
 import { SyncBridge } from '../../core/SyncBridge';
 import { Fragment } from '../Destructible';
 import type { DriveConfig } from '../IControllableTank';
-import {
-  makeCamouflageCanvas,
-  makeCrossDecalCanvas,
-  makeGlacisGeometry,
-  makeNumberDecalCanvas,
-  makeTrackTexture,
-  makeWedgeGeometry,
-  makeWedgeTurretGeometry,
-} from '../TankGeometryFactories';
+import { makeRankDecalCanvas, type CamoParams, darken } from '../TankGeometryFactories';
 import { TankBase, type TankSpec, type TankVisuals } from './TankBase';
+import { TankDataStore } from '../../data/TankDataStore';
+import { TankVisualBuilder, type BuiltVisuals } from '../TankVisualBuilder';
 
 /**
- * 静态展示坦克基类（虎式 / M1）
+ * NPC 难度外观配置(对应 CONFIG.combat.tierVisuals 的结构)。
  * ------------------------------------------------------------
- * 承载静态坦克的共同逻辑：fixed 刚体、复用玩家坦克的几何工厂、
- * 击毁后翻倒/炮塔炸飞/碎片飞溅。
+ * 所有字段可选(rookie 全空)。用统一接口 + as 断言访问,避免 as const 联合类型
+ * 的 'in' 操作符收窄问题(TS 会收窄成 Record<key,unknown> 而非具体成员)。
+ */
+interface TierVisual {
+  /** 原色整体变暗系数(regular) */
+  darken?: number;
+  /** 磨损叠加(regular) */
+  wearBoost?: number;
+  /** 配色绝对覆盖(veteran 黑灰) */
+  camoOverride?: Partial<CamoParams>;
+  /** 军衔标识类型(regular chevron / veteran skull) */
+  rank?: 'chevron' | 'skull';
+  /** 标识颜色 */
+  rankColor?: number;
+}
+
+/**
+ * 静态展示坦克基类(虎式 / M1)
+ * ------------------------------------------------------------
+ * 承载静态坦克的共同逻辑:fixed 刚体、tier 外观(NPC 难度)、击毁翻倒/炮塔炸飞/碎片。
+ *
+ * 视觉构建委托 TankVisualBuilder(唯一几何构建源,游戏+编辑器共用);
+ * 本类只负责 Builder 不管的【运行时装饰】:tier 配色覆盖 + 军衔贴花。
+ *
+ * 数据从 TankDataStore 取(运行时 JSON);maxHp/debugDrive 等非视觉参数仍从 CONFIG。
  */
 export abstract class StaticTankBase extends TankBase {
   /**
@@ -43,24 +57,29 @@ export abstract class StaticTankBase extends TankBase {
    */
   protected abstract get variant(): 'tiger' | 'abrams';
 
-  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, yaw: number) {
-    super(physics, render, spawn);
+  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, yaw: number, tier?: NpcTier) {
+    super(physics, render, spawn, tier);
     // 静态坦克出生带朝向
     this.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
   }
 
+  /** 取本车型的视觉数据(从 TankDataStore) */
+  private get visualData() {
+    return this.variant === 'tiger' ? TankDataStore.getTiger() : TankDataStore.getAbrams();
+  }
+
   protected getSpec(): TankSpec {
+    const data = this.visualData;
     const cfg = CONFIG.staticTank[this.variant];
-    const hh = cfg.hull;
     return {
-      name: `${this.variant === 'tiger' ? 'Tiger' : 'Abrams'} ${cfg.number}`,
+      name: `${this.variant === 'tiger' ? 'Tiger' : 'Abrams'} ${data.number}`,
       bodyHalf: {
-        x: hh.topHalfX + cfg.track.halfX,
-        y: hh.height,
-        z: hh.bottomHalfZ,
+        x: data.hull.topHalfX + data.track.halfX,
+        y: data.hull.height,
+        z: data.hull.bottomHalfZ,
       },
       initialBodyType: RAPIER.RigidBodyType.Fixed,
-      colliderOffset: { x: 0, y: hh.height, z: 0 },
+      colliderOffset: { x: 0, y: data.hull.height, z: 0 },
       colliderDensity: 2,
       damage: {
         maxHp: cfg.maxHp,
@@ -112,344 +131,101 @@ export abstract class StaticTankBase extends TankBase {
     return fragments;
   }
 
+  /**
+   * 视觉构建:委托 TankVisualBuilder + 追加 tier 军衔贴花。
+   * ------------------------------------------------------------
+   * Builder 负责纯几何(从数据);本类追加运行时 tier 装饰:
+   *  - 配色覆盖:resolveTierCamo 算出 camoOverride 传 Builder(NPC 难度配色)
+   *  - 军衔贴花:addRankDecal 在 Builder 产出后追加到炮塔
+   */
   protected buildVisuals(): TankVisuals {
-    const variant = this.variant;
-    const cfg = CONFIG.staticTank[variant];
-    const c = cfg.colors;
-
-    const camoCanvas = makeCamouflageCanvas({ base: c.camo.base, blobDark: c.camo.blobDark, blobMid: c.camo.blobMid });
-    const hullTex = new CanvasTexture(camoCanvas);
-    hullTex.wrapS = hullTex.wrapT = RepeatWrapping;
-    hullTex.repeat.set(3, 2);
-    hullTex.anisotropy = 4;
-
-    const turretTex = new CanvasTexture(camoCanvas);
-    turretTex.wrapS = turretTex.wrapT = RepeatWrapping;
-    turretTex.repeat.set(4, 1);
-    turretTex.anisotropy = 4;
-
-    const mat: Record<string, MeshStandardMaterial> = {
-      hull: new MeshStandardMaterial({ map: hullTex, color: 0xffffff, roughness: 0.88, metalness: 0.1 }),
-      turret: new MeshStandardMaterial({ map: turretTex, color: 0xffffff, roughness: 0.82, metalness: 0.1 }),
-      trackMetal: new MeshStandardMaterial({ color: c.trackMetal, roughness: 0.55, metalness: 0.5 }),
-      wheelRubber: new MeshStandardMaterial({ color: c.wheelRubber, roughness: 0.95, metalness: 0.0 }),
-      wheelHub: new MeshStandardMaterial({ color: c.wheelHub, roughness: 0.5, metalness: 0.6 }),
-      barrel: new MeshStandardMaterial({ color: c.barrel, roughness: 0.5, metalness: 0.6 }),
-      detail: new MeshStandardMaterial({ color: c.detail, roughness: 0.6, metalness: 0.4 }),
-      fender: new MeshStandardMaterial({ color: c.fender, roughness: 0.86, metalness: 0.1 }),
-    };
-
-    const group = new Group();
-
-    // 车体
-    const hullGeo = makeWedgeGeometry({
-      bottomHalfX: cfg.hull.bottomHalfX, topHalfX: cfg.hull.topHalfX,
-      bottomHalfZ: cfg.hull.bottomHalfZ, topHalfZ: cfg.hull.topHalfZ,
-      height: cfg.hull.height, centerY: cfg.hull.centerY,
-    });
-    const hullMesh = new Mesh(hullGeo, mat.hull);
-    hullMesh.castShadow = true;
-    hullMesh.receiveShadow = true;
-    group.add(hullMesh);
-
-    const frontHatch = (cfg.hull as { frontHatch?: { halfX: number; halfY: number; halfZ: number; x: number; y: number; z: number } }).frontHatch;
-    if (frontHatch) {
-      const fh = frontHatch;
-      const fmesh = new Mesh(new BoxGeometry(fh.halfX * 2, fh.halfY * 2, fh.halfZ * 2), mat.hull);
-      fmesh.position.set(fh.x, fh.y, fh.z);
-      fmesh.castShadow = true;
-      group.add(fmesh);
+    // 分支取精确类型数据(getTiger→TigerData / getAbrams→AbramsData),
+    // 避免 visualData 联合类型无法按 variant 收窄导致 buildTiger/buildAbrams 类型不匹配
+    if (this.variant === 'tiger') {
+      const data = TankDataStore.getTiger();
+      const built = TankVisualBuilder.buildTiger(data, this.buildCtx(data.colors.camo));
+      return this.toTankVisuals(built, data.turret.body);
     }
+    const data = TankDataStore.getAbrams();
+    const built = TankVisualBuilder.buildAbrams(data, this.buildCtx(data.colors.camo));
+    return this.toTankVisuals(built, data.turret.body);
+  }
 
-    if (cfg.hull.frontSlope) {
-      const fs = cfg.hull.frontSlope;
-      const fmesh = new Mesh(makeGlacisGeometry(fs.halfX, fs.halfDepth, fs.halfHeight), mat.hull);
-      fmesh.position.set(fs.x, fs.y, fs.z);
-      fmesh.castShadow = true;
-      fmesh.receiveShadow = true;
-      group.add(fmesh);
-    }
+  /** 构建上下文:迷彩种子 + 可选 tier 配色覆盖(NPC 难度外观) */
+  private buildCtx(baseCamo: CamoParams): { camoSeed: number; camoOverride?: CamoParams } {
+    return { camoSeed: this.id, camoOverride: this.tier ? this.resolveTierCamo(baseCamo) : undefined };
+  }
 
-    const { leftTrackTex, rightTrackTex } = this.buildTracks(group, cfg, mat);
-
-    const turret = new Group();
-    turret.position.set(cfg.turret.offset.x, cfg.turret.offset.y, cfg.turret.offset.z);
-    const tb = cfg.turret.body;
-    const turretGeo = tb.frontHalfZ != null && tb.backHalfZ != null
-      ? makeWedgeTurretGeometry({
-          bottomHalfX: tb.bottomHalfX, topHalfX: tb.topHalfX,
-          bottomHalfZ: tb.bottomHalfZ, frontHalfZ: tb.frontHalfZ, backHalfZ: tb.backHalfZ,
-          height: tb.height, centerY: tb.centerY,
-        })
-      : makeWedgeGeometry({
-          bottomHalfX: tb.bottomHalfX, topHalfX: tb.topHalfX,
-          bottomHalfZ: tb.bottomHalfZ, topHalfZ: tb.topHalfZ,
-          height: tb.height, centerY: tb.centerY,
-        });
-    const turretMesh = new Mesh(turretGeo, mat.turret);
-    turretMesh.castShadow = true;
-    turretMesh.receiveShadow = true;
-    turret.add(turretMesh);
-
-    this.addBustle(turret, cfg.turret.bustle, mat.turret);
-    this.addBustle(turret, cfg.turret.frontShield, mat.turret);
-    this.addCupola(turret, cfg.turret.cupola, mat.turret);
-
-    if (cfg.turret.sight) {
-      const s = cfg.turret.sight;
-      const sight = new Mesh(new BoxGeometry(s.halfX * 2, s.halfY * 2, s.halfZ * 2), mat.detail);
-      sight.position.set(s.x, s.y, s.z);
-      sight.castShadow = true;
-      turret.add(sight);
-    }
-
-    if (cfg.turret.loaderHatch) {
-      const lh = cfg.turret.loaderHatch;
-      const hatch = new Mesh(new CylinderGeometry(lh.radius, lh.radius, lh.height, 14), mat.turret);
-      hatch.position.set(lh.x, lh.y, lh.z);
-      hatch.castShadow = true;
-      turret.add(hatch);
-    }
-
-    this.addMgStation(turret, (cfg.turret as { mgStation?: any }).mgStation, mat);
-
-    const barrel = new Group();
-    barrel.position.set(cfg.barrel.offset.x, cfg.barrel.offset.y, cfg.barrel.offset.z);
-
-    const barrelMesh = new Mesh(
-      new CylinderGeometry(cfg.barrel.radius, cfg.barrel.radius, cfg.barrel.length, 16),
-      mat.barrel,
-    );
-    barrelMesh.rotation.x = Math.PI / 2;
-    barrelMesh.position.z = cfg.barrel.length / 2;
-    barrelMesh.castShadow = true;
-    barrel.add(barrelMesh);
-
-    this.addMantlet(barrel, cfg.mantlet, mat.barrel);
-    this.addBarrelDetail(barrel, cfg, mat.barrel);
-
-    const muzzle = new Object3D();
-    muzzle.position.set(0, 0, cfg.barrel.length);
-    barrel.add(muzzle);
-    turret.add(barrel);
-
-    this.addDecals(turret, cfg, tb);
-
-    group.add(turret);
-
+  /** 把 Builder 产出转为 TankVisuals + 追加 tier 军衔贴花 */
+  private toTankVisuals(built: BuiltVisuals, turretBody: { bottomHalfX: number; centerY: number }): TankVisuals {
+    this.addRankDecal(built.turret, turretBody);
     return {
-      group,
-      turret,
-      barrel,
-      muzzle,
-      leftTrackTex,
-      rightTrackTex,
-      barrelBaseZ: cfg.barrel.offset.z,
+      group: built.group,
+      turret: built.turret,
+      barrel: built.barrel,
+      muzzle: built.muzzle,
+      leftTrackTex: built.leftTrackTex,
+      rightTrackTex: built.rightTrackTex,
+      barrelBaseZ: built.barrelBaseZ,
     };
   }
 
-  private buildTracks(
-    group: Group,
-    cfg: any,
-    mat: Record<string, MeshStandardMaterial>,
-  ): { leftTrackTex: CanvasTexture; rightTrackTex: CanvasTexture } {
-    const tr = cfg.track;
-    const rw = cfg.roadWheel;
-    const straightLen = (tr.halfZ - tr.halfY) * 2;
-    const straightGeo = new BoxGeometry(tr.halfX, tr.halfY * 2, straightLen);
-    const returnGeo = new BoxGeometry(tr.halfX * 0.9, tr.halfY * 0.6, straightLen);
-    const sprocketGeo = new CylinderGeometry(tr.halfY, tr.halfY, tr.halfX * 2, 24);
-    const toothedSprocketGeo = new CylinderGeometry(tr.halfY * 1.12, tr.halfY * 1.12, tr.halfX * 2, 12);
-    const wheelGeo = new CylinderGeometry(rw.radius, rw.radius, rw.halfWidth * 2, 20);
-    const hubGeo = new CylinderGeometry(rw.radius * 0.6, rw.radius * 0.6, rw.halfWidth * 1.2, 16);
-
-    const stagger = cfg.roadWheelStagger;
-    let staggerGeo: CylinderGeometry | null = null;
-    if (stagger) {
-      staggerGeo = new CylinderGeometry(stagger.radius, stagger.radius, stagger.halfWidth * 2, 18);
+  /**
+   * 按 tier 派生迷彩配色(M3+ NPC 难度外观)。
+   * ------------------------------------------------------------
+   *  rookie:  原配色不动
+   *  regular: 原色 darken + wearBoost(暗沉老兵感)
+   *  veteran: camoOverride 黑灰覆盖(两车型统一变黑,远距离黑色剪影)
+   * darken/wearBoost 基于原色派生(tiger 灰绿/abrams 沙黄各自加深);
+   * camoOverride 绝对值覆盖(veteran)。undefined(玩家/中立)→原配色(零回归)。
+   */
+  private resolveTierCamo(base: CamoParams): CamoParams {
+    if (!this.tier) return base;
+    // as TierVisual:统一接口访问,避免 as const 联合的 'in' 收窄问题
+    const tierCfg = CONFIG.combat.tierVisuals[this.tier] as TierVisual;
+    let params: CamoParams = { ...base };
+    if (tierCfg.darken) {
+      params.base = darken(base.base, tierCfg.darken);
+      params.blobDark = darken(base.blobDark, tierCfg.darken);
+      params.blobMid = darken(base.blobMid, tierCfg.darken);
     }
-
-    const wheelZs: number[] = [];
-    for (let i = 0; i < rw.count; i++) {
-      wheelZs.push(-rw.zSpan + (2 * rw.zSpan * i) / (rw.count - 1));
+    if (tierCfg.wearBoost) {
+      params.wear = Math.min(1, (base.wear ?? 0.25) + tierCfg.wearBoost);
     }
+    if (tierCfg.camoOverride) {
+      params = { ...params, ...tierCfg.camoOverride };
+    }
+    return params;
+  }
 
-    let leftTrackTex!: CanvasTexture;
-    let rightTrackTex!: CanvasTexture;
-
+  /**
+   * 军衔标识贴花(M3+ NPC 难度区分):rookie 无,regular 双道杠,veteran 骷髅。
+   * 贴炮塔后部两侧(z=-0.7,避开编号 z=-0.2 / 十字 z=0.4),玩家追击时可见难度。
+   * 资源由 TankBase.dispose 遍历 group 统一回收(贴花 mesh 在 turret→group 树内)。
+   */
+  private addRankDecal(turret: Group, tb: { bottomHalfX: number; centerY: number }): void {
+    const tierCfg = this.tier ? (CONFIG.combat.tierVisuals[this.tier] as TierVisual) : null;
+    if (!tierCfg?.rank) return;
+    const rankTex = new CanvasTexture(makeRankDecalCanvas(tierCfg.rank, tierCfg.rankColor ?? 0xffffff));
+    rankTex.anisotropy = 4;
+    const rankMat = new MeshStandardMaterial({
+      map: rankTex,
+      transparent: true,
+      alphaTest: 0.5,
+      depthWrite: false,
+      roughness: 0.8,
+    });
+    const rankGeo = new PlaneGeometry(0.4, 0.4);
     for (const side of [-1, 1]) {
-      const trackTex = makeTrackTexture(tr.texRepeat);
-      trackTex.wrapS = trackTex.wrapT = RepeatWrapping;
-      if (side === -1) leftTrackTex = trackTex;
-      else rightTrackTex = trackTex;
-      const trackMat = new MeshStandardMaterial({ color: cfg.colors.trackMetal, map: trackTex, roughness: 0.9, metalness: 0.3 });
-
-      const track = new Mesh(straightGeo, trackMat);
-      track.position.set(side * tr.offsetX, tr.centerY, 0);
-      track.castShadow = true;
-      track.receiveShadow = true;
-      group.add(track);
-
-      if (cfg.returnRoller) {
-        const returnTrack = new Mesh(returnGeo, trackMat);
-        returnTrack.position.set(side * tr.offsetX, tr.centerY + tr.halfY * 1.4, 0);
-        returnTrack.castShadow = true;
-        group.add(returnTrack);
-      }
-
-      for (const z of [-tr.halfZ + tr.halfY, tr.halfZ - tr.halfY]) {
-        const isDrive = z > 0 && cfg.toothedSprocket;
-        const sprocket = new Mesh(isDrive ? toothedSprocketGeo : sprocketGeo, mat.trackMetal);
-        sprocket.rotation.z = Math.PI / 2;
-        sprocket.position.set(side * tr.offsetX, tr.centerY, z);
-        sprocket.castShadow = true;
-        group.add(sprocket);
-      }
-
-      const rr = cfg.returnRoller;
-      if (rr) {
-        const rrGeo = new CylinderGeometry(rr.radius, rr.radius, rr.halfWidth * 2, 14);
-        for (let i = 0; i < rr.count; i++) {
-          const wz = rr.count === 1 ? 0 : -rr.zSpan + (2 * rr.zSpan * i) / (rr.count - 1);
-          const rmesh = new Mesh(rrGeo, mat.wheelHub);
-          rmesh.rotation.z = Math.PI / 2;
-          rmesh.position.set(side * rr.offsetX, rr.centerY, wz);
-          rmesh.castShadow = true;
-          group.add(rmesh);
-        }
-      }
-
-      for (const wz of wheelZs) {
-        const wheel = new Mesh(wheelGeo, mat.wheelRubber);
-        wheel.rotation.z = Math.PI / 2;
-        wheel.position.set(side * rw.offsetX, rw.centerY, wz);
-        wheel.castShadow = true;
-        group.add(wheel);
-        const hub = new Mesh(hubGeo, mat.wheelHub);
-        hub.rotation.z = Math.PI / 2;
-        hub.position.set(side * (rw.offsetX + rw.halfWidth), rw.centerY, wz);
-        group.add(hub);
-      }
-
-      if (stagger && staggerGeo) {
-        const sCount = rw.count - 1;
-        for (let i = 0; i < sCount; i++) {
-          const wz = -stagger.zSpan + (2 * stagger.zSpan * i) / Math.max(1, sCount - 1) + stagger.zSpan / (rw.count);
-          const wheel = new Mesh(staggerGeo, mat.wheelRubber);
-          wheel.rotation.z = Math.PI / 2;
-          wheel.position.set(side * stagger.offsetX, stagger.centerY, wz);
-          wheel.castShadow = true;
-          group.add(wheel);
-        }
-      }
-
-      const fg = cfg.fender;
-      const fender = new Mesh(new BoxGeometry(fg.halfX * 2, fg.halfY * 2, fg.halfZ * 2), mat.fender);
-      fender.position.set(side * fg.offsetX, fg.centerY, 0);
-      fender.castShadow = true;
-      fender.receiveShadow = true;
-      group.add(fender);
-
-      const sk = cfg.sideSkirt;
-      if (sk) {
-        const skirt = new Mesh(new BoxGeometry(sk.halfX * 2, sk.halfY * 2, sk.halfZ * 2), mat.fender);
-        skirt.position.set(side * sk.offsetX, sk.centerY, 0);
-        skirt.castShadow = true;
-        skirt.receiveShadow = true;
-        group.add(skirt);
-      }
-    }
-
-    return { leftTrackTex, rightTrackTex };
-  }
-
-  private addBustle(turret: Group, b: any | undefined, m: MeshStandardMaterial): void {
-    if (!b) return;
-    const mesh = new Mesh(new BoxGeometry(b.halfX * 2, b.halfY * 2, b.halfZ * 2), m);
-    mesh.position.set(b.x, b.y, b.z);
-    mesh.castShadow = true;
-    turret.add(mesh);
-  }
-
-  private addCupola(turret: Group, cp: any | undefined, m: MeshStandardMaterial): void {
-    if (!cp) return;
-    const cupola = new Mesh(new CylinderGeometry(cp.radius, cp.radius, cp.height, 14), m);
-    cupola.position.set(cp.x, cp.y, cp.z);
-    cupola.castShadow = true;
-    turret.add(cupola);
-  }
-
-  private addMgStation(turret: Group, mg: any | undefined, mat: Record<string, MeshStandardMaterial>): void {
-    if (!mg) return;
-    const base = new Mesh(new BoxGeometry(mg.baseHalf.x * 2, mg.baseHalf.y * 2, mg.baseHalf.z * 2), mat.detail);
-    base.position.set(mg.base.x, mg.base.y, mg.base.z);
-    base.castShadow = true;
-    turret.add(base);
-    const barrel = new Mesh(
-      new CylinderGeometry(mg.barrelRadius, mg.barrelRadius, mg.barrelLen, 10),
-      mat.barrel,
-    );
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(mg.barrel.x, mg.barrel.y, mg.barrel.z + mg.barrelLen / 2);
-    barrel.castShadow = true;
-    turret.add(barrel);
-  }
-
-  private addMantlet(barrel: Group, mn: any | undefined, m: MeshStandardMaterial): void {
-    if (!mn) return;
-    const mesh = new Mesh(new CylinderGeometry(mn.radius, mn.radius, mn.halfZ * 2, 20), m);
-    mesh.rotation.x = Math.PI / 2;
-    mesh.position.z = mn.halfZ;
-    mesh.castShadow = true;
-    barrel.add(mesh);
-  }
-
-  private addBarrelDetail(barrel: Group, cfg: any, m: MeshStandardMaterial): void {
-    if (cfg.muzzleBrake) {
-      const mb = cfg.muzzleBrake;
-      const mesh = new Mesh(new CylinderGeometry(mb.radius, mb.radius, mb.length, 16), m);
-      mesh.rotation.x = Math.PI / 2;
-      mesh.position.z = cfg.barrel.length + mb.length / 2;
-      mesh.castShadow = true;
-      barrel.add(mesh);
-    } else if (cfg.thermalSleeve) {
-      const ts = cfg.thermalSleeve;
-      const mesh = new Mesh(new CylinderGeometry(ts.radius, ts.radius, ts.length, 16), m);
-      mesh.rotation.x = Math.PI / 2;
-      mesh.position.z = cfg.barrel.length * ts.posRatio;
-      mesh.castShadow = true;
-      barrel.add(mesh);
-    }
-  }
-
-  private addDecals(turret: Group, cfg: any, tb: any): void {
-    const numTex = new CanvasTexture(makeNumberDecalCanvas(cfg.number));
-    numTex.anisotropy = 4;
-    const numMat = new MeshStandardMaterial({ map: numTex, transparent: true, alphaTest: 0.5, depthWrite: false, roughness: 0.8 });
-    const decalGeo = new PlaneGeometry(0.5, 0.5);
-    for (const side of [-1, 1]) {
-      const decal = new Mesh(decalGeo, numMat);
-      decal.position.set(side * (tb.bottomHalfX + 0.02), tb.centerY + 0.05, -0.2);
+      const decal = new Mesh(rankGeo, rankMat);
+      decal.position.set(side * (tb.bottomHalfX + 0.02), tb.centerY + 0.05, -0.7);
       decal.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
       turret.add(decal);
-    }
-
-    if (cfg.decal.cross) {
-      const crossTex = new CanvasTexture(makeCrossDecalCanvas());
-      crossTex.anisotropy = 4;
-      const crossMat = new MeshStandardMaterial({ map: crossTex, transparent: true, alphaTest: 0.5, depthWrite: false, roughness: 0.8 });
-      const crossGeo = new PlaneGeometry(0.45, 0.45);
-      for (const side of [-1, 1]) {
-        const cross = new Mesh(crossGeo, crossMat);
-        cross.position.set(side * (tb.bottomHalfX + 0.02), tb.centerY + 0.05, 0.4);
-        cross.rotation.y = side > 0 ? Math.PI / 2 : -Math.PI / 2;
-        turret.add(cross);
-      }
     }
   }
 
   private blowTurret(epicenter: { x: number; y: number; z: number }): void {
-    const cfg = CONFIG.staticTank[this.variant] as any;
+    const cfg = CONFIG.staticTank[this.variant] as { turret: { body: { frontHalfZ?: number; backHalfZ?: number; bottomHalfZ: number; bottomHalfX: number; height: number } } };
     const tcfg = cfg.turret.body;
     const wpos = new Vector3();
     const wquat = new Quaternion();

@@ -159,6 +159,13 @@ export class Overlay {
       // 玩法说明:随关卡选择动态切换(初始填当前关卡 tip,selectLevel 时更新)
       `<div id="tw-tip" style="font-size:13px;color:#cfcfcf;line-height:1.9">${this.currentLevelTip()}</div>`,
       `</div>`,
+      `<div style="${boxStyle}">`,
+      `<div style="font-size:14px;color:#ff5252;margin-bottom:10px">敌方难度识别(看配色辨威胁)</div>`,
+      `<div style="font-size:13px;color:#cfcfcf;line-height:1.6;display:flex;gap:20px;flex-wrap:wrap;align-items:center">`,
+      `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:18px;height:18px;background:#6b6a55;border-radius:3px;display:inline-block"></span>新兵 量产</span>`,
+      `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:18px;height:18px;background:#4d4c3d;border-radius:3px;display:inline-block"></span>老兵 深色·双杠</span>`,
+      `<span style="display:inline-flex;align-items:center;gap:6px"><span style="width:18px;height:18px;background:#2a2a2a;border:2px solid #c0392b;border-radius:3px;display:inline-block"></span><b style="color:#ff5252">精英</b> 黑色·骷髅·会技能</span>`,
+      `</div></div>`,
       `<button id="tw-start" style="${btnStyleStr};font-size:18px;margin-top:6px">开始作战</button>`,
     ].join('');
   }

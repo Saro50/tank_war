@@ -42,64 +42,470 @@ export function makeTrackTexture(repeat: number): CanvasTexture {
   return tex;
 }
 
+/** 迷彩样式 */
+export type CamoStyle = 'nato-blotch' | 'stripe' | 'splatter' | 'two-tone' | 'legacy';
+
+/** 迷彩配色参数 */
+export interface CamoParams {
+  base: number;
+  blobDark: number;
+  blobMid: number;
+  /** 迷彩样式；默认 'nato-blotch' */
+  style?: CamoStyle;
+  /** 磨损/褪色强度 0~1；默认 0.25 */
+  wear?: number;
+}
+
+/** 迷彩生成选项 */
+export interface CamoOptions {
+  /** 随机种子；不同 seed 产生不同迷彩分布，同一 seed 可复现 */
+  seed?: number;
+  /** 纹理尺寸；默认 256 */
+  resolution?: number;
+  /** 覆盖 params 中的 style */
+  style?: CamoStyle;
+  /** 覆盖 params 中的 wear */
+  wear?: number;
+}
+
 /**
- * 程序生成 NATO 风三色迷彩 canvas(硬边块状 + 做旧噪点)
- * ------------------------------------------------------------
- * 算法：底色 → 随机不规则多边形斑块(中绿先铺、深褐叠上破坏规整)
- *       → 全图像素级亮度噪点(模拟灰尘/磨损/掉漆)。
- * 返回 canvas，调用方包成 CanvasTexture 并按需设 repeat 控密度。
+ * 程序生成迷彩 canvas
+ * ============================================================
+ * 支持多种军事风格：
+ *  - nato-blotch: 多层羽化不规则斑块（现代 NATO 三色迷彩）
+ *  - stripe:      倾斜/纵向硬边条纹（二战德军/冬季风格）
+ *  - splatter:    喷枪点状 + 飞溅拖尾（旧车/艺术化）
+ *  - two-tone:    双色分界 + 羽化过渡（沙漠/海军陆战队风格）
+ *  - legacy:      兼容旧版硬边块状 + 噪点
+ *
+ * 通用增强：
+ *  - 边缘羽化（模拟喷涂过度）
+ *  - 局部污渍层（低频泥渍 + 高频灰尘）
+ *  - 磨损褪色（随机掉漆/泛白）
+ *  - 可复现随机种子（同车型不同 ID 迷彩不同）
+ *
+ * 兼容旧签名：makeCamouflageCanvas(p, size)
  */
 export function makeCamouflageCanvas(
-  p: { base: number; blobDark: number; blobMid: number },
-  size = 256,
+  p: CamoParams,
+  sizeOrOpts: number | CamoOptions = 256,
+  maybeOpts?: CamoOptions,
 ): HTMLCanvasElement {
+  const size = typeof sizeOrOpts === 'number' ? sizeOrOpts : (sizeOrOpts.resolution ?? 256);
+  const opts = typeof sizeOrOpts === 'number' ? (maybeOpts ?? {}) : sizeOrOpts;
+  const style = opts.style ?? p.style ?? 'nato-blotch';
+  const wear = Math.max(0, Math.min(1, opts.wear ?? p.wear ?? 0.25));
+  const seed = opts.seed ?? 0;
+  const rng = createRng(seed);
+
   const cnv = document.createElement('canvas');
   cnv.width = size;
   cnv.height = size;
   const ctx = cnv.getContext('2d');
   if (!ctx) throw new Error('canvas 2d context unavailable');
-  const hex = (n: number): string => '#' + n.toString(16).padStart(6, '0');
 
   // 底色
   ctx.fillStyle = hex(p.base);
   ctx.fillRect(0, 0, size, size);
 
-  // 不规则硬边斑块(6~9 顶点多边形，半径扰动 → 不规则块状)
-  const drawBlob = (color: string, count: number, minR: number, maxR: number): void => {
-    ctx.fillStyle = color;
-    for (let i = 0; i < count; i++) {
-      const cx = Math.random() * size;
-      const cy = Math.random() * size;
-      const n = 6 + Math.floor(Math.random() * 4);
-      const baseR = minR + Math.random() * (maxR - minR);
-      ctx.beginPath();
-      for (let j = 0; j < n; j++) {
-        const ang = (j / n) * Math.PI * 2;
-        const r = baseR * (0.6 + Math.random() * 0.7);
-        const x = cx + Math.cos(ang) * r;
-        const y = cy + Math.sin(ang) * r;
-        if (j === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill();
-    }
-  };
-  drawBlob(hex(p.blobMid), 7, 30, 56); // 中绿大斑块(先铺)
-  drawBlob(hex(p.blobDark), 6, 18, 40); // 深黑褐斑块(叠上)
+  switch (style) {
+    case 'stripe':
+      drawStripe(ctx, rng, p, size);
+      break;
+    case 'splatter':
+      drawSplatter(ctx, rng, p, size);
+      break;
+    case 'two-tone':
+      drawTwoTone(ctx, rng, p, size);
+      break;
+    case 'legacy':
+      drawLegacyBlobs(ctx, rng, p, size);
+      break;
+    case 'nato-blotch':
+    default:
+      drawNatoBlotch(ctx, rng, p, size);
+      break;
+  }
 
-  // 做旧噪点(全图像素级亮度扰动 ±15)
+  // 局部污渍（泥渍/油污）—— 所有样式共用，增强真实感
+  addStains(ctx, rng, p, size, wear);
+
+  // 做旧噪点（灰尘/细小掉漆）
+  addNoise(ctx, rng, size, 22);
+
+  // 磨损褪色（掉漆泛白/边缘磨损）
+  if (wear > 0.05) addWear(ctx, rng, size, wear);
+
+  return cnv;
+}
+
+// ============================================================
+// 迷彩样式实现
+// ============================================================
+
+/** NATO 斑点：多层羽化不规则斑块 + 黑色点缀 + 沙色高光 */
+function drawNatoBlotch(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+): void {
+  // 中色大斑块（先铺，决定整体布局）
+  drawFeatheredBlob(ctx, rng, size, hex(p.blobMid), 8, size * 0.12, size * 0.26, 0.28, 5);
+  // 深色小斑块（叠上，破坏规整）
+  drawFeatheredBlob(ctx, rng, size, hex(p.blobDark), 10, size * 0.06, size * 0.16, 0.32, 6);
+  // 黑色 tiny 点缀（增加细碎层次）
+  const dark2 = darken(p.blobDark, 0.8);
+  drawFeatheredBlob(ctx, rng, size, hex(dark2), 14, size * 0.025, size * 0.06, 0.35, 5);
+  // 沙色高光小斑块（模拟掉漆/浅色灰尘，让表面不沉闷）
+  // 对浅色沙漠底色减弱提亮幅度，避免接近纯白显得塑料
+  const highlightFactor = isLightBase(p.base) ? 1.12 : 1.35;
+  const highlight = lighten(p.base, highlightFactor);
+  drawFeatheredBlob(ctx, rng, size, hex(highlight), 10, size * 0.02, size * 0.05, 0.4, 5);
+}
+
+/** 条纹：断裂不规则带状（德军/冬季风格） */
+function drawStripe(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+): void {
+  const bands = 3 + Math.floor(rng() * 3); // 3~5 条宽条纹
+  const angle = (rng() - 0.5) * 0.6;
+  const stripeW = size / (bands * 0.8);
+  const colors = [hex(p.blobMid), hex(p.blobDark), hex(darken(p.blobDark, 0.75))];
+
+  ctx.save();
+  ctx.translate(size / 2, size / 2);
+  ctx.rotate(angle);
+  ctx.translate(-size / 2, -size / 2);
+
+  for (let i = -1; i < bands + 1; i++) {
+    const baseX = i * stripeW + (rng() - 0.5) * stripeW * 0.3;
+    const w = stripeW * (0.6 + rng() * 0.5);
+    const color = colors[i % colors.length];
+
+    // 主条纹：用羽化矩形 + 随机分段断裂
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = size * 0.02;
+    ctx.fillStyle = color;
+    ctx.fillRect(baseX, -size, w, size * 3);
+    ctx.restore();
+
+    // 切出随机矩形“缺口”，模拟断裂/不规则边缘
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    const gaps = 2 + Math.floor(rng() * 3);
+    for (let g = 0; g < gaps; g++) {
+      const gx = baseX + rng() * w;
+      const gy = -size + rng() * size * 3;
+      const gw = w * (0.2 + rng() * 0.5);
+      const gh = size * (0.08 + rng() * 0.12);
+      ctx.fillRect(gx, gy, gw, gh);
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/** 喷溅：喷枪点状 + 飞溅拖尾 */
+function drawSplatter(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+): void {
+  const colors = [hex(p.blobMid), hex(p.blobDark)];
+  for (let c = 0; c < colors.length; c++) {
+    const color = colors[c];
+    const count = c === 0 ? 35 : 45;
+    for (let i = 0; i < count; i++) {
+      const cx = rng() * size;
+      const cy = rng() * size;
+      const r = (size * 0.015) + rng() * (size * 0.05);
+      const angle = rng() * Math.PI * 2;
+      const tailLen = r * (2 + rng() * 3);
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.shadowColor = color;
+      ctx.shadowBlur = r * 0.4;
+      ctx.fillStyle = color;
+      // 圆点主体
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+      // 拖尾
+      ctx.beginPath();
+      ctx.ellipse(tailLen * 0.6, 0, tailLen * 0.6, r * 0.45, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+  // 密集小点覆盖层
+  drawFeatheredBlob(ctx, rng, size, hex(darken(p.blobDark, 0.7)), 30, size * 0.01, size * 0.025, 0.3, 4);
+}
+
+/** 双色分层：不规则波浪分界（沙漠/海军陆战队风格） */
+function drawTwoTone(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+): void {
+  const splitY = size * (0.45 + rng() * 0.15);
+  const segments = 14;
+  const points: { x: number; y: number }[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const x = (i / segments) * size;
+    const noise = Math.sin(i * 0.8 + rng() * 3) * size * 0.04 + (rng() - 0.5) * size * 0.06;
+    points.push({ x, y: splitY + noise });
+  }
+
+  // 下半区域：深色渐变
+  ctx.save();
+  ctx.shadowColor = hex(p.blobMid);
+  ctx.shadowBlur = size * 0.04;
+  ctx.beginPath();
+  ctx.moveTo(0, size);
+  for (const pt of points) ctx.lineTo(pt.x, pt.y);
+  ctx.lineTo(size, size);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, splitY, 0, size);
+  grad.addColorStop(0, hex(p.blobMid));
+  grad.addColorStop(1, hex(p.blobDark));
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+
+  // 上半区域：叠几条不規則深色波浪带，打破单调
+  ctx.save();
+  ctx.globalAlpha = 0.45;
+  for (let i = 0; i < 4; i++) {
+    const y = splitY - size * (0.08 + rng() * 0.18);
+    const h = size * (0.03 + rng() * 0.04);
+    const grad2 = ctx.createLinearGradient(0, y - h, 0, y + h);
+    grad2.addColorStop(0, hex(p.base));
+    grad2.addColorStop(0.5, hex(p.blobDark));
+    grad2.addColorStop(1, hex(p.base));
+    ctx.fillStyle = grad2;
+    ctx.fillRect(0, y - h, size, h * 2);
+  }
+  ctx.restore();
+}
+
+/** 旧版硬边块状（兼容 legacy） */
+function drawLegacyBlobs(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+): void {
+  drawHardBlob(ctx, rng, size, hex(p.blobMid), 7, size * 0.12, size * 0.22, 6);
+  drawHardBlob(ctx, rng, size, hex(p.blobDark), 6, size * 0.07, size * 0.16, 6);
+}
+
+// ============================================================
+// 通用绘制辅助
+// ============================================================
+
+/** 绘制一个羽化边缘的不规则多边形斑块 */
+function drawFeatheredBlob(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  size: number,
+  color: string,
+  count: number,
+  minR: number,
+  maxR: number,
+  feather: number,
+  minVertices = 5,
+): void {
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = (minR + maxR) * 0.5 * feather;
+  ctx.fillStyle = color;
+  for (let i = 0; i < count; i++) {
+    const cx = rng() * size;
+    const cy = rng() * size;
+    const n = minVertices + Math.floor(rng() * 4);
+    const baseR = minR + rng() * (maxR - minR);
+    ctx.beginPath();
+    for (let j = 0; j < n; j++) {
+      const ang = (j / n) * Math.PI * 2;
+      const r = baseR * (0.65 + rng() * 0.7);
+      const x = cx + Math.cos(ang) * r;
+      const y = cy + Math.sin(ang) * r;
+      if (j === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** 绘制硬边不规则多边形斑块 */
+function drawHardBlob(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  size: number,
+  color: string,
+  count: number,
+  minR: number,
+  maxR: number,
+  minVertices = 5,
+): void {
+  ctx.fillStyle = color;
+  for (let i = 0; i < count; i++) {
+    const cx = rng() * size;
+    const cy = rng() * size;
+    const n = minVertices + Math.floor(rng() * 4);
+    const baseR = minR + rng() * (maxR - minR);
+    ctx.beginPath();
+    for (let j = 0; j < n; j++) {
+      const ang = (j / n) * Math.PI * 2;
+      const r = baseR * (0.6 + rng() * 0.7);
+      const x = cx + Math.cos(ang) * r;
+      const y = cy + Math.sin(ang) * r;
+      if (j === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+/** 局部污渍层：低频大污渍 + 高频小斑点 */
+function addStains(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  p: CamoParams,
+  size: number,
+  wear: number,
+): void {
+  // 低频大污渍（泥/油污），颜色更深，偏 canvas 下半部
+  const stainCount = 3 + Math.floor(rng() * 3);
+  for (let i = 0; i < stainCount; i++) {
+    const cx = rng() * size;
+    const cy = size * (0.55 + rng() * 0.45); // 偏下
+    const rx = size * (0.12 + rng() * 0.12);
+    const ry = size * (0.04 + rng() * 0.06);
+    const stainColor = hex(darken(p.blobDark, 0.65));
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rx, ry));
+    grad.addColorStop(0, stainColor);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.save();
+    ctx.globalAlpha = 0.35 + wear * 0.25;
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, (rng() - 0.5) * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 高频小灰尘/油污点
+  ctx.save();
+  ctx.globalAlpha = 0.25 + wear * 0.2;
+  for (let i = 0; i < size * 0.6; i++) {
+    const x = rng() * size;
+    const y = rng() * size;
+    const r = 0.5 + rng() * 1.5;
+    ctx.fillStyle = rng() > 0.5 ? '#1a1a1a' : '#5a5a5a';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** 全图噪点 */
+function addNoise(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  size: number,
+  amount: number,
+): void {
   const img = ctx.getImageData(0, 0, size, size);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
-    const n = (Math.random() - 0.5) * 30;
+    const n = (rng() - 0.5) * amount;
     d[i] = Math.max(0, Math.min(255, d[i] + n));
     d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
     d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
   }
   ctx.putImageData(img, 0, 0);
+}
 
-  return cnv;
+/** 磨损褪色：随机小区域变亮（掉漆露底漆/日晒泛白） */
+function addWear(
+  ctx: CanvasRenderingContext2D,
+  rng: () => number,
+  size: number,
+  wear: number,
+): void {
+  const count = Math.floor((0.08 + wear * 0.18) * size);
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  for (let i = 0; i < count; i++) {
+    const cx = rng() * size;
+    const cy = rng() * size;
+    const r = size * (0.01 + rng() * 0.03);
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    grad.addColorStop(0, 'rgba(255,255,255,0.35)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ============================================================
+// 颜色/随机工具
+// ============================================================
+
+function hex(n: number): string {
+  return '#' + n.toString(16).padStart(6, '0');
+}
+
+/** 颜色变暗(NPC 难度配色派生用,故 export) */
+export function darken(c: number, factor: number): number {
+  const r = Math.max(0, Math.min(255, ((c >> 16) & 0xff) * factor));
+  const g = Math.max(0, Math.min(255, ((c >> 8) & 0xff) * factor));
+  const b = Math.max(0, Math.min(255, (c & 0xff) * factor));
+  return (r << 16) | (g << 8) | b;
+}
+
+/** 颜色变亮 */
+function lighten(c: number, factor: number): number {
+  const r = Math.max(0, Math.min(255, ((c >> 16) & 0xff) * factor));
+  const g = Math.max(0, Math.min(255, ((c >> 8) & 0xff) * factor));
+  const b = Math.max(0, Math.min(255, (c & 0xff) * factor));
+  return (r << 16) | (g << 8) | b;
+}
+
+/** 判断底色是否偏亮（沙漠黄等），用于动态调整高光强度 */
+function isLightBase(c: number): boolean {
+  const r = (c >> 16) & 0xff;
+  const g = (c >> 8) & 0xff;
+  const b = c & 0xff;
+  return (r + g + b) / 3 > 140;
+}
+
+/** 可复现伪随机生成器（基于 xorshift / mulberry32 混合） */
+function createRng(seed = 0): () => number {
+  let s = seed >>> 0;
+  if (s === 0) s = 123456789;
+  return () => {
+    s = Math.imul(s ^ (s >>> 15), s | 1);
+    s ^= s + Math.imul(s ^ (s >>> 7), s | 61);
+    return ((s ^ (s >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /**
@@ -146,6 +552,94 @@ export function makeCrossDecalCanvas(size = 128): HTMLCanvasElement {
   ctx.fillRect(cx - armW, cx - armL + 4, armW * 2, armL * 2 - 8);
   ctx.fillRect(cx - armL + 4, cx - armW, armL * 2 - 8, armW * 2);
   return cv;
+}
+
+/**
+ * 军衔标识贴花(M3+ NPC 难度区分)。
+ * ------------------------------------------------------------
+ *  - chevron: 双道 V 形杠(士官军衔),regular 用
+ *  - skull:   简化骷髅(圆头颅+双眼洞+鼻孔+牙齿),veteran 用
+ * 圆形深底 + 彩色图案,贴炮塔后部两侧。alphaTest 抠圆外。
+ * 配色远距离主区分(黑/暗),标识近战辅助确认。
+ */
+export function makeRankDecalCanvas(
+  rank: 'chevron' | 'skull',
+  color: number,
+  size = 128,
+): HTMLCanvasElement {
+  const cnv = document.createElement('canvas');
+  cnv.width = size;
+  cnv.height = size;
+  const ctx = cnv.getContext('2d');
+  if (!ctx) throw new Error('canvas 2d context unavailable');
+  ctx.clearRect(0, 0, size, size);
+  // 圆形深底(与战术编号贴花一致,视觉风格统一)
+  ctx.fillStyle = '#1a1d12';
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 6, 0, Math.PI * 2);
+  ctx.fill();
+  if (rank === 'chevron') {
+    drawChevron(ctx, size, color);
+  } else {
+    drawSkull(ctx, size, color);
+  }
+  return cnv;
+}
+
+/** 双道 V 杠(开口向上,士官臂章常见样式) */
+function drawChevron(ctx: CanvasRenderingContext2D, size: number, color: number): void {
+  ctx.strokeStyle = hex(color);
+  ctx.lineWidth = size * 0.075;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const cx = size / 2;
+  for (let i = 0; i < 2; i++) {
+    const yOff = size * (0.36 + i * 0.2);
+    const span = size * 0.22;
+    ctx.beginPath();
+    ctx.moveTo(cx - span, yOff);
+    ctx.lineTo(cx, yOff + size * 0.13);
+    ctx.lineTo(cx + span, yOff);
+    ctx.stroke();
+  }
+}
+
+/** 简化骷髅(圆头颅 + 双眼洞 + 鼻孔 + 牙齿线) */
+function drawSkull(ctx: CanvasRenderingContext2D, size: number, color: number): void {
+  const cx = size / 2;
+  const cy = size * 0.47;
+  const r = size * 0.24;
+  // 头颅 + 下颌(主体, color 填充)
+  ctx.fillStyle = hex(color);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(cx - r * 0.72, cy + r * 0.2, r * 1.44, r * 0.45);
+  // 眼洞(深色镂空)
+  ctx.fillStyle = '#1a1d12';
+  ctx.beginPath();
+  ctx.ellipse(cx - r * 0.4, cy - r * 0.1, r * 0.22, r * 0.28, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(cx + r * 0.4, cy - r * 0.1, r * 0.22, r * 0.28, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 鼻孔(倒三角)
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + r * 0.02);
+  ctx.lineTo(cx - r * 0.1, cy + r * 0.22);
+  ctx.lineTo(cx + r * 0.1, cy + r * 0.22);
+  ctx.closePath();
+  ctx.fill();
+  // 牙齿(竖线分隔)
+  ctx.strokeStyle = '#1a1d12';
+  ctx.lineWidth = size * 0.018;
+  for (let i = -2; i <= 2; i++) {
+    const x = cx + i * r * 0.2;
+    ctx.beginPath();
+    ctx.moveTo(x, cy + r * 0.28);
+    ctx.lineTo(x, cy + r * 0.6);
+    ctx.stroke();
+  }
 }
 
 /**

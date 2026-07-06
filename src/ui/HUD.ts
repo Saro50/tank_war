@@ -1,5 +1,7 @@
+import type { AmmoType } from '../config';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { Objective } from '../systems/Objective';
+import type { SkillId } from '../systems/SkillSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('HUD');
@@ -15,10 +17,11 @@ const log = Logger.create('HUD');
  */
 export class HUD {
   private readonly crosshair: HTMLDivElement;
-  private readonly tankInfo: HTMLDivElement;
   private readonly ammoInfo: HTMLDivElement;
   private readonly killText: HTMLDivElement;
   private readonly killBarInner: HTMLDivElement;
+  /** 技能栏 3 格(M3):维修/过载/装甲,按 E/R/F 激活 */
+  private readonly skillCells: HTMLDivElement[] = [];
   private mounted = false;
 
   constructor(container: HTMLElement) {
@@ -28,16 +31,24 @@ export class HUD {
     Object.assign(this.crosshair.style, crosshairStyle);
     container.appendChild(this.crosshair);
 
-    this.tankInfo = document.createElement('div');
-    Object.assign(this.tankInfo.style, tankInfoStyle);
-    this.tankInfo.textContent = '';
-    container.appendChild(this.tankInfo);
-
     // 弹药信息(右下角):弹药数 + 低弹药预警 + 耗尽闪烁 + 装填提示
     this.ammoInfo = document.createElement('div');
     Object.assign(this.ammoInfo.style, ammoInfoStyle);
     this.ammoInfo.textContent = '';
     container.appendChild(this.ammoInfo);
+
+    // 技能栏(M3,弹药栏上方):3 格 维修/过载/装甲,按 E/R/F 激活。
+    // 状态视觉引导:激活=金色 ● / 可用=绿色 ✓ / 冷却中=灰色+百分比
+    const skillBar = document.createElement('div');
+    Object.assign(skillBar.style, skillBarStyle);
+    for (const m of SKILL_META) {
+      const cell = document.createElement('div');
+      Object.assign(cell.style, skillCellStyle);
+      cell.textContent = `${m.key} ${m.label}`;
+      skillBar.appendChild(cell);
+      this.skillCells.push(cell);
+    }
+    container.appendChild(skillBar);
 
     // 耗尽闪烁动画(注入一次性 <style>;用视觉强引导"必须去补给")
     const styleEl = document.createElement('style');
@@ -75,32 +86,49 @@ export class HUD {
   /**
    * 每帧更新当前附身坦克信息。
    * @param ammo 弹药信息(可选,main 从玩家 weapon 读取传入);缺省则不显示弹药(兼容旧调用)。
+   *             含 AP/HE 各自库存 + 当前选种(HUD 高亮选种)。
    */
   update(
-    tank: IControllableTank,
-    ammo?: { current: number; max: number; resupplying: boolean },
+    _tank: IControllableTank,
+    ammo?: {
+      ap: number;
+      he: number;
+      maxAp: number;
+      maxHe: number;
+      /** 当前选弹(HUD 用方括号高亮该栏) */
+      selected: AmmoType;
+      resupplying: boolean;
+    },
     objective?: Objective,
+    /** 技能栏数据(M3,顺序 repair/boost/armor);缺省不更新技能栏 */
+    skills?: ReadonlyArray<{ id: SkillId; cdRatio: number; active: boolean }>,
   ): void {
     if (!this.mounted) return;
-    const hp = Math.max(0, tank.getHp());
-    const state = tank.state === 'intact' ? '完好' : '已击毁';
-    this.tankInfo.textContent = `${tank.name}  |  HP ${hp}  |  ${state}`;
 
-    // 弹药状态(视觉引导:满=白 / 低=橙 / 耗尽=红闪烁 / 装填=绿)
+    // 弹药状态(三栏:AP/HE 各自库存,当前选种用方括号高亮;空仓弹种加 ⚠;选种耗尽强提示)
     if (ammo) {
-      const empty = ammo.current < 1;
-      const resupplying = ammo.resupplying && !empty;
-      if (empty) {
-        this.ammoInfo.textContent = '弹药耗尽 — 前往补给点装填';
+      const apEmpty = ammo.ap < 1;
+      const heEmpty = ammo.he < 1;
+      const selEmpty = ammo.selected === 'ap' ? apEmpty : heEmpty;
+      if (selEmpty) {
+        // 当前选种耗尽:红闪烁强引导(切换弹种或回补给)
+        this.ammoInfo.textContent = `${ammo.selected.toUpperCase()} 弹耗尽 — 切换弹种(1/2)或前往补给点`;
         this.ammoInfo.style.color = '#ff5252';
-        this.ammoInfo.classList.add('tw-blink'); // 闪烁强引导
-      } else if (resupplying) {
-        this.ammoInfo.textContent = `装填中  ${ammo.current} / ${ammo.max}`;
+        this.ammoInfo.classList.add('tw-blink');
+      } else if (ammo.resupplying) {
+        this.ammoInfo.textContent = `装填中  AP ${ammo.ap}/${ammo.maxAp} │ HE ${ammo.he}/${ammo.maxHe}`;
         this.ammoInfo.style.color = '#7fff7f';
         this.ammoInfo.classList.remove('tw-blink');
       } else {
-        this.ammoInfo.textContent = `弹药  ${ammo.current} / ${ammo.max}`;
-        this.ammoInfo.style.color = ammo.current <= 5 ? '#ffaa33' : '#e6e6e6'; // 低弹药橙色预警
+        // 三栏:选种用 [方括号] 高亮;空仓弹种前加 ⚠ 提醒;低弹药(≤3)橙色预警
+        const apLow = ammo.ap <= 3;
+        const heLow = ammo.he <= 3;
+        const apStr = `${apEmpty ? '⚠ ' : ''}AP ${ammo.ap}/${ammo.maxAp}`;
+        const heStr = `${heEmpty ? '⚠ ' : ''}HE ${ammo.he}/${ammo.maxHe}`;
+        const apPart = ammo.selected === 'ap' ? `[${apStr}]` : apStr;
+        const hePart = ammo.selected === 'he' ? `[${heStr}]` : heStr;
+        this.ammoInfo.textContent = `${apPart}   │   ${hePart}`;
+        this.ammoInfo.style.color = apLow || heLow ? '#ffaa33' : '#e6e6e6';
         this.ammoInfo.classList.remove('tw-blink');
       }
     } else {
@@ -126,6 +154,29 @@ export class HUD {
       this.killText.textContent = '';
       this.killBarInner.style.width = '0%';
     }
+
+    // 技能栏(M3):按顺序更新 3 格状态(激活=金色● / 可用=绿色 / 冷却中=灰色+百分比)
+    if (skills) {
+      for (let i = 0; i < this.skillCells.length; i++) {
+        const cell = this.skillCells[i];
+        const s = skills[i];
+        if (!s) continue;
+        const meta = SKILL_META[i];
+        if (s.active) {
+          cell.style.background = '#b8860b';
+          cell.style.color = '#fff';
+          cell.textContent = `${meta.key} ${meta.label} ●`;
+        } else if (s.cdRatio >= 1) {
+          cell.style.background = 'rgba(40,110,40,0.75)';
+          cell.style.color = '#e6e6e6';
+          cell.textContent = `${meta.key} ${meta.label}`;
+        } else {
+          cell.style.background = 'rgba(20,22,28,0.75)';
+          cell.style.color = '#888';
+          cell.textContent = `${meta.key} ${meta.label} ${Math.round(s.cdRatio * 100)}%`;
+        }
+      }
+    }
   }
 }
 
@@ -148,21 +199,6 @@ const crosshairStyle: Partial<CSSStyleDeclaration> = {
   pointerEvents: 'none', // 准星不拦截鼠标，否则无法点中画布
   zIndex: '10',
   willChange: 'transform',
-};
-
-const tankInfoStyle: Partial<CSSStyleDeclaration> = {
-  position: 'absolute',
-  top: '12px',
-  left: '12px',
-  zIndex: '10',
-  pointerEvents: 'none',
-  fontFamily: 'monospace',
-  fontSize: '14px',
-  color: '#e6e6e6',
-  background: 'rgba(20,22,28,0.75)',
-  padding: '6px 10px',
-  borderRadius: '6px',
-  textShadow: '0 1px 2px rgba(0,0,0,0.6)',
 };
 
 const ammoInfoStyle: Partial<CSSStyleDeclaration> = {
@@ -213,4 +249,36 @@ const barInnerStyle: Partial<CSSStyleDeclaration> = {
   background: '#ffcc33',
   borderRadius: '3px',
   transition: 'width 0.3s ease',
+};
+
+/** 技能栏元数据(M3):顺序必须与 SkillId(repair/boost/armor)及 main 传入 skills 数组一致 */
+const SKILL_META = [
+  { key: 'E', label: '维修' }, // repair
+  { key: 'R', label: '过载' }, // boost
+  { key: 'F', label: '装甲' }, // armor
+] as const;
+
+/** 技能栏容器:右下角,弹药栏上方,水平排列 3 格 */
+const skillBarStyle: Partial<CSSStyleDeclaration> = {
+  position: 'absolute',
+  bottom: '52px', // 弹药栏(bottom:12px + 高约30)上方留空
+  right: '12px',
+  zIndex: '10',
+  pointerEvents: 'none',
+  display: 'flex',
+  gap: '6px',
+};
+
+/** 技能格:按键+名称+状态。颜色随状态变(激活金/可用绿/冷却灰) */
+const skillCellStyle: Partial<CSSStyleDeclaration> = {
+  fontFamily: 'monospace',
+  fontSize: '13px',
+  fontWeight: 'bold',
+  color: '#e6e6e6',
+  background: 'rgba(20,22,28,0.75)',
+  padding: '5px 9px',
+  borderRadius: '6px',
+  textShadow: '0 1px 2px rgba(0,0,0,0.6)',
+  minWidth: '66px',
+  textAlign: 'center',
 };

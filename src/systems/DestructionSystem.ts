@@ -11,6 +11,7 @@ import { FencePost } from '../entities/FencePost';
 import { ResupplyPoint } from '../entities/ResupplyPoint';
 import { StaticTankBase } from '../entities/tanks/StaticTankBase';
 import type { IControllableTank } from '../entities/IControllableTank';
+import type { TankPart } from '../entities/TankStatus';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Destruction');
@@ -108,6 +109,19 @@ export class DestructionSystem {
   private controllableTanks: IControllableTank[] = [];
   /** collider handle → 坦克 映射(handleCollision 任意坦克撞击判定,不再只认玩家) */
   private readonly tankByCollider = new Map<number, IControllableTank>();
+  /**
+   * collider handle → {tank, part} 部位反查表(M2)。
+   * 含主 collider(兜底 hull)+ 部位 sensor collider(turret/track)。
+   * AP 直击(applyDirectHit)据此判定命中部位,注入对应 debuff 到 tank.status。
+   */
+  private readonly partByCollider = new Map<number, { tank: IControllableTank; part: TankPart }>();
+  /**
+   * 所有坦克的刚体集合(M2 部位 sensor 修复)。
+   * 部位 sensor 开了 COLLISION_EVENTS 但不产生物理阻挡——两坦克靠近时 sensor 接触对方
+   * 主 collider 会触发 handleCollision,需据此排除"被撞方是坦克 body"的情况(坦克互撞走物理推开,
+   * 不走 applyDamage 撞击破坏,否则巡逻靠近的坦克会互相误伤)。
+   */
+  private readonly tankBodySet = new Set<RAPIER.RigidBody>();
   /** 撞击冷却(秒)：连续碰撞不重复扣血，避免一帧多次 applyDamage */
   private ramCooldown = 0;
 
@@ -123,7 +137,15 @@ export class DestructionSystem {
   setControllableTanks(tanks: IControllableTank[]): void {
     this.controllableTanks = tanks;
     this.tankByCollider.clear();
-    for (const t of tanks) this.tankByCollider.set(t.colliderHandle, t);
+    this.partByCollider.clear();
+    this.tankBodySet.clear();
+    for (const t of tanks) {
+      this.tankByCollider.set(t.colliderHandle, t);
+      // 部位反查:主 collider 兜底 hull + 部位 sensor collider(turret/track)
+      this.partByCollider.set(t.colliderHandle, { tank: t, part: 'hull' });
+      for (const pc of t.partColliders) this.partByCollider.set(pc.handle, { tank: t, part: pc.part });
+      this.tankBodySet.add(t.body); // 撞击判定排除坦克互撞(M2 部位 sensor 修复)
+    }
   }
 
   /**
@@ -133,6 +155,22 @@ export class DestructionSystem {
    */
   registerTank(tank: IControllableTank): void {
     this.tankByCollider.set(tank.colliderHandle, tank);
+    // 部位反查(动态生成的 NPC 也接入 M2 部位判定)
+    this.partByCollider.set(tank.colliderHandle, { tank, part: 'hull' });
+    for (const pc of tank.partColliders) this.partByCollider.set(pc.handle, { tank, part: pc.part });
+    this.tankBodySet.add(tank.body);
+  }
+
+  /**
+   * 注销一辆坦克的 collider 映射(NPC 被击毁并清理时调用)。
+   * 注意:不把它从 controllableTanks 移除,残骸仍需 update(烟/特效)和渲染。
+   * 也不从 tankBodySet 移除——坦克(含残骸)之间的碰撞仍应被跳过,避免小擦碰引发爆炸伤害。
+   */
+  unregisterTank(tank: IControllableTank): void {
+    this.tankByCollider.delete(tank.colliderHandle);
+    this.partByCollider.delete(tank.colliderHandle);
+    for (const pc of tank.partColliders) this.partByCollider.delete(pc.handle);
+    // 故意不操作 tankBodySet:残骸刚体仍在该集合中,防止坦克撞残骸触发 applyDamage
   }
 
   /**
@@ -477,13 +515,82 @@ export class DestructionSystem {
   /**
    * 炮击爆炸：以爆心为中心、爆炸半径内施加破坏(复用统一 applyDamage)。
    * @param excludeTank 开火的坦克（通常是当前活性坦克），防止自伤。
+   * @param destructibleMultiplier 可破坏物(箱子/房屋/补给点)伤害倍率。
+   *        HE 弹清建筑强(>1)、AP 弹对建筑弱(<1);坦克伤害不受此影响(走装甲逻辑)。
+   *        详见 docs/combat-layer-design.md §2.5.1。
    */
   onExplosion(
     pos: { x: number; y: number; z: number },
     radius: number,
     excludeTank?: IControllableTank,
+    destructibleMultiplier = 1,
   ): void {
-    this.applyDamage(pos, radius, CONFIG.destruction.hitDamage, excludeTank);
+    this.applyDamage(pos, radius, CONFIG.destruction.hitDamage, excludeTank, destructibleMultiplier);
+  }
+
+  /**
+   * AP 直击伤害(弹药种类增强 · 直击管线 + M2 部位判定)
+   * ------------------------------------------------------------
+   * 与 AOE applyDamage 的区别:
+   *  - 精确到单个命中目标(按 hitColliderHandle 反查 partByCollider),无距离衰减(满伤);
+   *  - 按弹种算装甲穿透(ap.armorPenetration 削弱方向装甲);
+   *  - 命中坦克时直击结算 + 按部位(turret/track)注入 debuff 到 tank.status;
+   *  - 命中环境(建筑/树/地面)则降级为小 AOE。
+   *
+   * @param ammoCfg AP 弹种参数(含 damageMultiplier/armorPenetration/destructibleMultiplier)
+   */
+  applyDirectHit(
+    pos: { x: number; y: number; z: number },
+    hitColliderHandle: number,
+    excludeTank: IControllableTank | undefined,
+    ammoCfg: typeof CONFIG.weapon.ammoTypes.ap,
+  ): void {
+    const info = this.partByCollider.get(hitColliderHandle);
+    if (info) {
+      const { tank, part } = info;
+      if (tank === excludeTank || tank.state !== 'intact') return;
+      // 伤害结算:部位仅决定 debuff,伤害本身走方向装甲(与 hull 一致)
+      const baseMult = this.armorMultiplier(tank, pos);
+      const pen = 1 - ammoCfg.armorPenetration;
+      const reduction = tank.status.damageReduction;
+      const dmg = CONFIG.destruction.hitDamage * ammoCfg.damageMultiplier * baseMult * pen * reduction;
+      this.fragments.push(...tank.takeHit(pos, dmg));
+      // 部位 debuff 注入(M2 核心:turret/track 命中注入对应 debuff 到 status)
+      this.applyPartDebuff(tank, part);
+      log.info('AP direct hit', { tank: tank.displayName, part, dmg: dmg.toFixed(1), hp: tank.getHp().toFixed(0) });
+      return;
+    }
+    // 非坦克部位 collider(AP 打到环境:建筑/树/地面):降级为小 AOE,对可破坏物按 AP 倍率
+    this.applyDamage(
+      pos,
+      CONFIG.destruction.explosionRadius * 0.4,
+      CONFIG.destruction.hitDamage,
+      excludeTank,
+      ammoCfg.destructibleMultiplier,
+    );
+  }
+
+  /**
+   * 部位 debuff 注入(M2):按命中部位给 tank.status 注入临时 debuff。
+   * ------------------------------------------------------------
+   *  turret → 炮塔转速 debuff(对手准星劣势,玩家绕侧窗口)
+   *  track  → 机动 debuff(大幅减速但仍可缓慢机动,保留策略空间)
+   *  hull/ammoRack → 无 debuff(hull 仅方向装甲;ammoRack 本期不做,用户已定无殉爆)
+   * debuff 经 TankStatus.apply 注入(同 id 覆盖防叠加),到期由 status.update 自动清除。
+   */
+  private applyPartDebuff(tank: IControllableTank, part: TankPart): void {
+    const cfg = CONFIG.combat.parts;
+    if (part === 'turret') {
+      tank.status.apply({ id: 'turret-dmg', remaining: cfg.turret.duration, turretScale: cfg.turret.scale });
+    } else if (part === 'track') {
+      tank.status.apply({
+        id: 'track-dmg',
+        remaining: cfg.track.duration,
+        moveScale: cfg.track.scale,
+        turnScale: cfg.track.scale,
+      });
+    }
+    // hull: 无 debuff(仅方向装甲,已在伤害结算体现);ammoRack: 本期不做
   }
 
   /**
@@ -498,14 +605,19 @@ export class DestructionSystem {
    * 炮击调用 damage=hitDamage；撞击调用 damage=按坦克速度缩放(由 handleCollision 算好)。
    * 这样炮击与撞击对每个可破坏物完全一致。
    * @param excludeTank 可选：指定一辆坦克跳过伤害（如开火的坦克防自伤）。
+   * @param destructibleMultiplier 可破坏物(箱子/房屋/补给点)伤害倍率,默认 1。
+   *        HE>1(清建筑强)、AP<1(对建筑弱);坦克伤害不乘(走装甲逻辑)。
    */
   applyDamage(
     pos: { x: number; y: number; z: number },
     radius: number,
     damage: number,
     excludeTank?: IControllableTank,
+    destructibleMultiplier = 1,
   ): void {
     const r2 = radius * radius;
+    // 可破坏物伤害(按弹种倍率):坦克走 damage(装甲逻辑),环境走 dmgDes(倍率调整)
+    const dmgDes = damage * destructibleMultiplier;
 
     // 箱子(HP 机制：伤害按距离衰减，hp<=0 才倒塌)
     let destroyed = 0;
@@ -519,7 +631,7 @@ export class DestructionSystem {
       if (d2 >= r2) continue;
       const dist = Math.sqrt(d2);
       const falloff = 1 - dist / radius;
-      const frags = d.takeHit(pos, damage * falloff);
+      const frags = d.takeHit(pos, dmgDes * falloff);
       if (frags.length > 0) destroyed++;
       this.fragments.push(...frags);
     }
@@ -538,7 +650,9 @@ export class DestructionSystem {
       const dist = Math.sqrt(d2);
       const falloff = 1 - dist / radius;
       const mult = this.armorMultiplier(tank, pos); // 侧/背命中加伤(所有坦克)
-      const frags = tank.takeHit(pos, damage * falloff * mult);
+      // 状态层 damageReduction(装甲倾斜等减伤 buff,乘法叠加在最后)
+      const dmg = damage * falloff * mult * tank.status.damageReduction;
+      const frags = tank.takeHit(pos, dmg);
       this.fragments.push(...frags);
       tanksHit++;
     }
@@ -555,7 +669,7 @@ export class DestructionSystem {
       if (d2 >= r2) continue;
       const dist = Math.sqrt(d2);
       const falloff = 1 - dist / radius;
-      rp.takeHit(pos, damage * falloff);
+      rp.takeHit(pos, dmgDes * falloff);
       resupplyHit++;
     }
 
@@ -651,7 +765,7 @@ export class DestructionSystem {
       if (distSq < radius * radius) {
         const dist = Math.sqrt(distSq);
         const falloff = 1 - dist / radius;
-        house.hp -= damage * falloff;
+        house.hp -= dmgDes * falloff;
       }
       if (house.hp <= 0) {
         house.collapsed = true;
@@ -700,8 +814,13 @@ export class DestructionSystem {
     // 取被撞物位置作爆心(另一方的刚体 translation)
     const other = this.tankByCollider.has(h1) ? h2 : h1;
     const col = this.physics.world.getCollider(other);
+    if (!col) return;
     const hitBody = col.parent();
     if (!hitBody) return;
+    // M2 部位 sensor 修复:被撞方若为坦克 body(对方主 collider 或部位 sensor 的 parent),跳过。
+    // 部位 sensor 不产生物理阻挡但会触发碰撞事件 → 若不排除,两坦克巡逻靠近时 sensor 接触
+    // 对方主 collider 会被误判为"坦克撞击"互相伤害。坦克互撞走物理推开,不走 applyDamage。
+    if (this.tankBodySet.has(hitBody)) return;
     const t = hitBody.translation();
 
     // 伤害按撞击者速度缩放:满速(moveSpeed)≈ 炮击的 0.5 倍,慢速按比例衰减
@@ -750,6 +869,24 @@ export class DestructionSystem {
     if (absAngle < Math.PI / 4) return 1.0;                    // 正面(装甲最厚)
     if (absAngle < Math.PI * 3 / 4) return cfg.sideMultiplier; // 侧面
     return cfg.backMultiplier;                                  // 背面
+  }
+
+  /**
+   * 从多个候选 collider handle 中选"部位优先"的(M2 部位判定修正)。
+   * ------------------------------------------------------------
+   * AP 一帧内可能同时接触主 collider + 部位 sensor(部位在主 collider 内部)。
+   * 若取主 collider(hull),部位 debuff 永不触发;故优先选部位(turret/track)handle,
+   * 保证弱点部位瞄准有效。无部位 handle 则返回第一个(hull 兜底)。
+   */
+  pickPartHandle(handles: number[]): number | undefined {
+    if (handles.length === 0) return undefined;
+    // 优先选部位(非 hull):turret/track 命中触发 debuff
+    for (const h of handles) {
+      const info = this.partByCollider.get(h);
+      if (info && info.part !== 'hull') return h;
+    }
+    // 无部位:返回第一个(主 collider hull 或环境物)
+    return handles[0];
   }
 
   /** 诊断 */

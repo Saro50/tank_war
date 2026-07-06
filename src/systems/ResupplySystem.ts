@@ -50,6 +50,14 @@ export class ResupplySystem {
     this.tanks.push({ getTank, weapon });
   }
 
+  /**
+   * 注销一辆坦克(NPC 被击毁清理时调用)。
+   * 防止已销毁 NPC 的 weapon/tank 引用继续被 ResupplySystem 持有,造成内存泄漏。
+   */
+  unregister(tank: IControllableTank): void {
+    this.tanks = this.tanks.filter((entry) => entry.getTank() !== tank);
+  }
+
   /** 每帧:补给点生命周期 + 装填判定 */
   update(dt: number): void {
     // 1. 补给点更新(destroyed 倒计时再生;intact 标识旋转)
@@ -59,7 +67,7 @@ export class ResupplySystem {
     for (const { getTank, weapon } of this.tanks) {
       const tank = getTank();
       if (tank.state !== 'intact') continue;
-      if (weapon.getAmmo() >= weapon.getMaxAmmo()) continue; // 满弹药不装填(省调用)
+      if (weapon.isAmmoFull()) continue; // 所有弹种都满则不装填(省调用)
       const p = tank.body.translation();
       for (const rp of this.points) {
         if (rp.contains({ x: p.x, z: p.z })) {

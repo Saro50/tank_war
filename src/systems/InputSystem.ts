@@ -1,3 +1,5 @@
+import type { AmmoType } from '../config';
+import type { SkillId } from './SkillSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Input');
@@ -11,6 +13,8 @@ const log = Logger.create('Input');
  *   炮管：A 抬起 / S 放下   (barrelDir: +1=抬 -1=放)
  *   开火：Space             (fire: 是否按下)
  *   切换：Tab               (switchNext: 是否按下，需边沿触发)
+ *   选弹：1 穿甲弹 / 2 高爆弹 (switchAmmo: 当前按下的弹种;WeaponSystem 内部去重)
+ *   技能：E 维修 / R 引擎过载 / F 装甲倾斜 (skill: 当前按下的技能;SkillSystem 内部 CD 去重)
  */
 export interface InputState {
   forward: number;
@@ -19,6 +23,10 @@ export interface InputState {
   barrelDir: number;
   fire: boolean;
   switchNext: boolean;
+  /** 当前按下的弹种(1=AP/2=HE),未按=null。WeaponSystem.switchAmmo 内部按"同弹种不切"去重 */
+  switchAmmo: AmmoType | null;
+  /** 当前按下的技能(E/R/F),未按=null。SkillSystem.tryActivate 内部按 CD/激活去重 */
+  skill: SkillId | null;
   /** 鼠标在窗口客户区的像素坐标，供 HUD 准星使用 */
   mouseX: number;
   mouseY: number;
@@ -55,7 +63,7 @@ export class InputSystem {
     window.addEventListener('blur', this.onBlur);
     window.addEventListener('mousemove', this.onMouseMove);
     this.attached = true;
-    log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / Tab 切换坦克' });
+    log.info('input attached', { hint: '↑↓←→ 移动 / Q W 炮塔 / A S 炮管 / Space 开火 / 1 2 选弹 / E R F 技能 / Tab 切换坦克' });
   }
 
   /** 解绑监听器(场景重置/卸载用)，防 hot-reload 后重复监听与按键卡住 */
@@ -78,6 +86,8 @@ export class InputSystem {
       barrelDir: (this.has('KeyA') ? 1 : 0) - (this.has('KeyS') ? 1 : 0),
       fire: this.has('Space'),
       switchNext: this.has('Tab'),
+      switchAmmo: this.has('Digit1') ? 'ap' : this.has('Digit2') ? 'he' : null,
+      skill: this.has('KeyE') ? 'repair' : this.has('KeyR') ? 'boost' : this.has('KeyF') ? 'armor' : null,
       mouseX: this.mouseX,
       mouseY: this.mouseY,
     };

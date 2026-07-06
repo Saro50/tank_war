@@ -5,6 +5,7 @@ import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { TankController } from '../systems/TankController';
 import type { WeaponSystem } from '../systems/WeaponSystem';
 import type { ResupplySystem } from '../systems/ResupplySystem';
+import type { SkillSystem } from '../systems/SkillSystem';
 import type { InputState } from '../systems/InputSystem';
 import { findNearestEnemy, hasLineOfSight } from './perception';
 import { Logger } from '../utils/Logger';
@@ -17,8 +18,9 @@ export interface NpcMission {
   waypoints: { x: number; z: number }[];
 }
 
-/** NPC 难度档位(对应 CONFIG.npcTiers 的键) */
-export type NpcTier = 'rookie' | 'regular' | 'veteran';
+/** NPC 难度档位(对应 CONFIG.npcTiers 的键)。
+ *  类型定义已移至 config.ts(共享层),此处 re-export 保持 director 现有 import 路径不变。 */
+export type { NpcTier } from '../config';
 
 /** 导演姿态(全阵营,由 DirectorSystem 评估):NPC 据此修饰行为参数实现集体智能 */
 export type Posture = 'aggro' | 'normal' | 'defensive';
@@ -67,6 +69,8 @@ const EMPTY_INPUT: InputState = {
   barrelDir: 0,
   fire: false,
   switchNext: false,
+  switchAmmo: null,
+  skill: null,
   mouseX: 0,
   mouseY: 0,
 };
@@ -140,10 +144,12 @@ export class NpcController {
     private readonly resupply: ResupplySystem,
     /** 导演姿态访问器:NPC 据此修饰反应/蓄瞄/撤退参数,实现集体智能(aggro/normal/defensive) */
     private readonly getPosture: () => Posture,
+    /** 技能系统(M3 仅 veteran 注入;rookie/regular 为 undefined → 不决策技能,保持纯机械 AI) */
+    private readonly skill?: SkillSystem,
   ) {
     this.maxHp = tank.getHp();
     this.orbitSign = Math.random() < 0.5 ? -1 : 1; // 随机偏好绕侧/侧撤方向
-    log.info('npc ready', { tank: tank.displayName, tier: profile.name });
+    log.info('npc ready', { tank: tank.displayName, tier: profile.name, hasSkill: !!skill });
   }
 
   /** 导演分配巡逻任务 */
@@ -196,6 +202,7 @@ export class NpcController {
     if (this.paused || this.tank.state !== 'intact') return;
     this.controller.applyAim(this.input, dt);
     this.weapon.update(this.input, dt);
+    this.skill?.update(dt); // M3:推进技能冷却/激活(repair tick 回血+中断检测)
   }
 
   // ============================================================
@@ -245,8 +252,50 @@ export class NpcController {
 
     this.transition(dt);
     this.updateAimTimer(dt); // 蓄瞄计时:engage/retreat 且对准时累计,脱靶衰减
+    this.thinkSkill(); // M3:veteran 技能决策(激活后 produceInput 据 isActive('repair') 站桩)
     this.input = this.produceInput();
     this.checkStuck(dt); // 卡住检测,可能覆盖 input.turn 触发绕障
+  }
+
+  /**
+   * 技能决策(M3,仅 veteran)。
+   * ------------------------------------------------------------
+   * rookie/regular 无 skill(undefined)直接返回,保持纯机械 AI(平衡性)。
+   * veteran 按态势触发:
+   *  - 残血 + 脱战(无视线/远)→ 维修(战斗中修是送死,须脱战)
+   *  - 中血 + 正交战 → 装甲倾斜(硬换窗口)
+   *  - 目标远 + approach → 引擎过载(冲锋逼近)
+   *  - 残血 + retreat → 引擎过载(逃跑加速)
+   * tryActivate 内部 CD/激活去重,高频调用幂等无副作用。
+   */
+  private thinkSkill(): void {
+    if (!this.skill) return; // 无 skill = 非 veteran,不决策
+    if (!this.target) return;
+    const hpRatio = this.maxHp > 0 ? this.tank.getHp() / this.maxHp : 1;
+    const dist = this.distTo(this.target);
+    const cfg = CONFIG.combat.npcSkill;
+    // 维修:残血 + 脱战(无视线或远,避免战斗中站桩送死)
+    if (hpRatio < cfg.repairHpRatio) {
+      const hasLOS = hasLineOfSight(this.physics, this.tank, this.target);
+      if (!hasLOS || dist > this.profile.fireRange * 1.3) {
+        this.skill.tryActivate('repair');
+        return;
+      }
+    }
+    // 装甲倾斜:中血 + 正交战(硬换窗口)
+    if (hpRatio < cfg.armorHpRatio && this.state === 'engage') {
+      this.skill.tryActivate('armor');
+      return;
+    }
+    // 引擎过载:目标远需逼近冲锋
+    if (dist > this.profile.fireRange * cfg.boostDistRatio && this.state === 'approach') {
+      this.skill.tryActivate('boost');
+      return;
+    }
+    // 引擎过载:残血逃跑加速
+    if (hpRatio < cfg.repairHpRatio && this.state === 'retreat') {
+      this.skill.tryActivate('boost');
+    }
   }
 
   /**
@@ -301,7 +350,7 @@ export class NpcController {
     //  - 不在 resupply:弹药≤阈值 → 进入 resupply 自主导航去补给。
     // resupply 中不被 target 判定打断(没弹药打了也没用);但血量骤降时上方
     //  RETREAT 块仍会优先接管 → 保命第一。
-    const ammoFull = this.weapon.getAmmo() >= this.weapon.getMaxAmmo();
+    const ammoFull = this.weapon.isAmmoFull();
     if (this.state === 'resupply') {
       const hasPoint = this.resupply.nearestActivePoint(this.tank.body.translation()) !== undefined;
       if (ammoFull || !hasPoint) {
@@ -374,6 +423,22 @@ export class NpcController {
 
   /** 各状态产出虚拟 InputState */
   private produceInput(): InputState {
+    // M3:维修激活时强制站桩(castMaxSpeed 约束),覆盖移动但保留瞄准/开火。
+    // NPC 维修期间是靶子,玩家可趁机绕侧——这是 veteran 维修的战术破绽,平衡其技能优势。
+    if (this.skill?.isActive('repair')) {
+      return {
+        forward: 0,
+        turn: 0,
+        turretDir: this.target ? this.aimTurn(this.target) : 0,
+        barrelDir: this.target ? this.aimBarrel(this.target) : 0,
+        fire: this.decideFire(),
+        switchNext: false,
+        switchAmmo: null,
+        skill: null,
+        mouseX: 0,
+        mouseY: 0,
+      };
+    }
     switch (this.state) {
       case 'patrol':
         return this.patrolInput();
@@ -403,7 +468,7 @@ export class NpcController {
       this.missionWpIdx = (this.missionWpIdx + 1) % this.mission.waypoints.length;
     }
     const scan = Math.sin(performance.now() * 0.0008) * 0.5; // 炮塔缓慢扫描
-    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: scan, barrelDir: 0, fire: false, switchNext: false, mouseX: 0, mouseY: 0 };
+    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: scan, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
   }
 
   /** APPROACH:朝目标移动,炮塔指向目标 */
@@ -417,6 +482,8 @@ export class NpcController {
       barrelDir: this.aimBarrel(this.target), // 接近途中预瞄炮管(抛物线弹道补偿),进射程即可打
       fire: false, // 接近中不开火(专注机动逼近),留给 engage/retreat
       switchNext: false,
+      switchAmmo: null,
+      skill: null,
       mouseX: 0,
       mouseY: 0,
     };
@@ -458,6 +525,8 @@ export class NpcController {
       barrelDir: this.aimBarrel(this.target), // 炮管俯仰:抛物线弹道补偿
       fire: this.decideFire(),
       switchNext: false,
+      switchAmmo: null,
+      skill: null,
       mouseX: 0,
       mouseY: 0,
     };
@@ -491,6 +560,8 @@ export class NpcController {
       barrelDir: this.aimBarrel(this.target),
       fire: this.decideFire(),
       switchNext: false,
+      switchAmmo: null,
+      skill: null,
       mouseX: 0,
       mouseY: 0,
     };
@@ -508,9 +579,9 @@ export class NpcController {
     const arrived = this.driveToward(dest, CONFIG.ammo.resupplyRadius * 0.7);
     if (arrived) {
       this.lastTurn = 0; // 到达:停下装填
-      return { forward: 0, turn: 0, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, mouseX: 0, mouseY: 0 };
+      return { forward: 0, turn: 0, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
     }
-    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, mouseX: 0, mouseY: 0 };
+    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
   }
 
   // ============================================================
@@ -635,7 +706,7 @@ export class NpcController {
     const dz = lead.z - muzzle.z;
     const d = Math.hypot(dx, dz);
     const dy = lead.y - muzzle.y;
-    const v = CONFIG.weapon.projectile.muzzleVelocity;
+    const v = CONFIG.weapon.ammoTypes[this.weapon.getSelectedAmmo()].muzzleVelocity;
     const g = Math.abs(CONFIG.physics.gravity.y);
     const range = this.tank.driveConfig.barrel.pitchRange;
     if (d < 1) return 0; // 太近:水平直射,无需补偿
@@ -681,7 +752,7 @@ export class NpcController {
     const sp = this.tank.body.translation();
     const tp = target.body.translation();
     const dist = Math.hypot(tp.x - sp.x, tp.z - sp.z);
-    const t = dist / CONFIG.weapon.projectile.muzzleVelocity;
+    const t = dist / CONFIG.weapon.ammoTypes[this.weapon.getSelectedAmmo()].muzzleVelocity;
     const vel = target.body.linvel();
     return { x: tp.x + vel.x * t, y: tp.y, z: tp.z + vel.z * t };
   }

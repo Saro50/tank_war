@@ -1,5 +1,6 @@
 import type { PhysicsWorld } from '../../core/PhysicsWorld';
 import type { RenderScene } from '../../core/RenderScene';
+import type { NpcTier } from '../../config';
 import type { TankBase } from './TankBase';
 import { T14Tank } from './T14Tank';
 import { TigerTank } from './TigerTank';
@@ -15,6 +16,7 @@ import { AbramsTank } from './AbramsTank';
  * (T14Tank 抬高到车身中心;StaticTankBase 用 collider offset 抬高),
  * 调用方(createTank/buildTanks)无需关心几何差异。
  *
+ * tier(可选):仅 NPC 传,决定外观配色+军衔标识(M3+)。玩家 T-14/中立不传(undefined→原配色)。
  * 未知 variant 抛异常——as const 下编译期不会发生,运行期兜底由调用方 try/catch。
  */
 export function createTank(
@@ -23,14 +25,15 @@ export function createTank(
   render: RenderScene,
   spawn: { x: number; y: number; z: number },
   yaw: number,
+  tier?: NpcTier,
 ): TankBase {
   switch (variant) {
     case 't14':
-      return new T14Tank(physics, render, spawn, yaw);
+      return new T14Tank(physics, render, spawn, yaw); // 玩家 T-14 无 tier(始终原配色)
     case 'tiger':
-      return new TigerTank(physics, render, spawn, yaw);
+      return new TigerTank(physics, render, spawn, yaw, tier);
     case 'abrams':
-      return new AbramsTank(physics, render, spawn, yaw);
+      return new AbramsTank(physics, render, spawn, yaw, tier);
     default:
       throw new Error(`unknown tank variant: ${variant}`);
   }

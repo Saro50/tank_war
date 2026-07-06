@@ -10,6 +10,7 @@ import type { DestructionSystem } from './DestructionSystem';
 import { NpcController, type NpcMission, type NpcTier, type Posture, resolveNpcProfile } from '../ai/NpcController';
 import type { ResupplySystem } from './ResupplySystem';
 import type { CaptureSystem } from './CaptureSystem';
+import { SkillSystem } from './SkillSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Director');
@@ -96,8 +97,11 @@ export class DirectorSystem {
       // 每 NPC 独立的武器(shake=undefined:NPC 开火不震玩家相机)
       const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
       // 按档位(tier)解析难度参数注入;缺失回退 regular(老兵)
-      const profile = resolveNpcProfile((cfg as { tier?: string }).tier);
-      const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply, () => this.posture);
+      const tierKey = (cfg as { tier?: string }).tier;
+      const profile = resolveNpcProfile(tierKey);
+      // M3:veteran 注入技能系统(rookie/regular 不传 skill,保持纯机械 AI——平衡性)
+      const skill = tierKey === 'veteran' ? new SkillSystem(() => tank) : undefined;
+      const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply, () => this.posture, skill);
       npc.setMission(this.pickPatrolMission());
       this.npcs.push(npc);
       this.npcWeapons.push(weapon);
@@ -176,15 +180,20 @@ export class DirectorSystem {
   // A1 波次生成
   // ============================================================
 
-  /** 清理已摧毁的 NPC(从列表移除 + 击杀计数) */
+  /** 清理已摧毁的 NPC(从列表移除 + 击杀计数 + 各系统注销,防内存泄漏) */
   private cleanupDeadNpcs(): void {
     for (let i = this.npcs.length - 1; i >= 0; i--) {
       if (this.npcs[i].dead) {
         const tank = this.npcs[i].controlledTank;
+        const weapon = this.npcWeapons[i];
         this._killCount++;
         this.npcs.splice(i, 1);
         this.npcWeapons.splice(i, 1);
         this.npcByTank.delete(tank);
+        // 从各系统注销:死后不再参与补给/碰撞判定,释放 Map 引用
+        this.resupply.unregister(tank);
+        weapon.removeTank(tank.id);
+        this.destruction.unregisterTank(tank);
         // 从占领判定注销:死后不再算"敌方在场据点"
         this.capture.unregisterEnemy(tank);
         log.info('npc destroyed', { tank: tank.displayName, killCount: this._killCount });
@@ -210,23 +219,38 @@ export class DirectorSystem {
   /**
    * 生成一个新 NPC:从 reserveVariants/spawnPoints 轮询创建坦克实体,
    * 接入 destruction(受击)+ resupply(装填),创建 NpcController 驱动。
+   * 轮询参数后委托 spawnEnemyAt(核心逻辑),DebugConsole 直接调 spawnEnemyAt 指定参数。
    */
   private spawnEnemy(): void {
     const variants = CONFIG.enemyFaction.reserveVariants;
     const variant = variants[this.spawnCounter % variants.length];
     const points = CONFIG.enemyFaction.spawnPoints;
     const point = points[this.spawnCounter % points.length];
-    const tank = createTank(variant, this.physics, this.render, { x: point.x, y: 0, z: point.z }, 0);
+    // tier 轮询(rookie→regular→veteran),供 createTank 外观 + NpcController 共用
+    const tiers: NpcTier[] = ['rookie', 'regular', 'veteran'];
+    const tierKey = tiers[this.spawnCounter % tiers.length];
+    this.spawnEnemyAt({ variant, tier: tierKey, x: point.x, z: point.z });
+  }
+
+  /**
+   * 在指定位置生成敌方坦克(完整接入各系统的核心逻辑)。
+   * ------------------------------------------------------------
+   * spawnEnemy(轮询参数) 与 DebugConsole(指定参数)共用此入口,
+   * 保证调试生成的 NPC 与波次生成的 NPC 行为/接入完全一致。
+   */
+  spawnEnemyAt(opts: { variant: string; tier: NpcTier; x: number; z: number }): void {
+    const { variant, tier, x, z } = opts;
+    const tank = createTank(variant, this.physics, this.render, { x, y: 0, z }, 0, tier);
     if (tank instanceof StaticTankBase) this.destruction.addStaticTank(tank);
     this.allTanks.push(tank); // 共享引用 → destruction.controllableTanks 自动包含(炮弹伤害)
     this.destruction.registerTank(tank); // 补 collider 映射(撞击判定)
     tank.possess(); // fixed→dynamic 可驾驶
     const controller = new TankController(tank, this.render);
     const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
-    // tier 轮询(rookie→regular→veteran 循环),让补充的 NPC 难度多样
-    const tiers: NpcTier[] = ['rookie', 'regular', 'veteran'];
-    const profile = resolveNpcProfile(tiers[this.spawnCounter % tiers.length]);
-    const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply, () => this.posture);
+    const profile = resolveNpcProfile(tier);
+    // M3:veteran 注入技能(rookie/regular 不传,保持纯机械 AI)
+    const skill = tier === 'veteran' ? new SkillSystem(() => tank) : undefined;
+    const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply, () => this.posture, skill);
     npc.setMission(this.pickPatrolMission());
     this.npcs.push(npc);
     this.npcWeapons.push(weapon);
@@ -234,7 +258,7 @@ export class DirectorSystem {
     this.resupply.register(tank, weapon);
     // 注册到占领系统:补充的 NPC 也纳入占领判定
     this.capture.registerEnemy(tank);
-    log.info('npc spawned', { tank: tank.displayName, variant, tier: profile.name, alive: this.npcs.length });
+    log.info('npc spawned', { tank: tank.displayName, variant, tier: profile.name, at: `${x.toFixed(0)},${z.toFixed(0)}`, alive: this.npcs.length });
   }
 
   // ============================================================
