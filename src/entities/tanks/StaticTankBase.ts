@@ -19,6 +19,7 @@ import { makeRankDecalCanvas, type CamoParams, darken } from '../TankGeometryFac
 import { TankBase, type TankSpec, type TankVisuals } from './TankBase';
 import { TankDataStore } from '../../data/TankDataStore';
 import { TankVisualBuilder, type BuiltVisuals } from '../TankVisualBuilder';
+import { convertTigerToModel, convertAbramsToModel } from '../../data/convertLegacy';
 
 /**
  * NPC 难度外观配置(对应 CONFIG.combat.tierVisuals 的结构)。
@@ -135,19 +136,33 @@ export abstract class StaticTankBase extends TankBase {
    * 视觉构建:委托 TankVisualBuilder + 追加 tier 军衔贴花。
    * ------------------------------------------------------------
    * Builder 负责纯几何(从数据);本类追加运行时 tier 装饰:
-   *  - 配色覆盖:resolveTierCamo 算出 camoOverride 传 Builder(NPC 难度配色)
-   *  - 军衔贴花:addRankDecal 在 Builder 产出后追加到炮塔
+   *  - 配色覆盖:resolveTierCamo 算出 camoOverride 传 buildCustom(NPC 难度配色)
+   *  - 军衔贴花:addRankDecal 在 buildCustom 产出后追加到炮塔
+   *
+   * Phase C:改用 buildCustom(数据驱动部件组合式),与原 buildTiger/buildAbrams 等价(零回归)。
    */
   protected buildVisuals(): TankVisuals {
-    // 分支取精确类型数据(getTiger→TigerData / getAbrams→AbramsData),
-    // 避免 visualData 联合类型无法按 variant 收窄导致 buildTiger/buildAbrams 类型不匹配
+    // 静态坦克物理参数(从 CONFIG.staticTank 取,mass=击毁后附加质量,isStatic=true)
+    const st = CONFIG.staticTank;
+    const phys = {
+      mass: st.destroyedMass,
+      isStatic: true as const,
+      damage: {
+        smokeThreshold: st.smokeThreshold,
+        destroyExplosionScale: st.destroyExplosionScale,
+        destroySmokeScale: st.destroySmokeScale,
+      },
+    };
+    // 分支取精确类型数据 + 转 TankModel + buildCustom
     if (this.variant === 'tiger') {
       const data = TankDataStore.getTiger();
-      const built = TankVisualBuilder.buildTiger(data, this.buildCtx(data.colors.camo));
+      const model = convertTigerToModel(data, { ...phys, maxHp: st.tiger.maxHp });
+      const built = TankVisualBuilder.buildCustom(model, this.buildCtx(data.colors.camo));
       return this.toTankVisuals(built, data.turret.body);
     }
     const data = TankDataStore.getAbrams();
-    const built = TankVisualBuilder.buildAbrams(data, this.buildCtx(data.colors.camo));
+    const model = convertAbramsToModel(data, { ...phys, maxHp: st.abrams.maxHp });
+    const built = TankVisualBuilder.buildCustom(model, this.buildCtx(data.colors.camo));
     return this.toTankVisuals(built, data.turret.body);
   }
 

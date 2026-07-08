@@ -5,6 +5,7 @@ import type { TankBase } from './TankBase';
 import { T14Tank } from './T14Tank';
 import { TigerTank } from './TigerTank';
 import { AbramsTank } from './AbramsTank';
+import { GltfTank } from './GltfTank';
 
 /**
  * 坦克工厂:variant 字符串 → 具体子类实例。
@@ -30,6 +31,9 @@ export function createTank(
   switch (variant) {
     case 't14':
       return new T14Tank(physics, render, spawn, yaw); // 玩家 T-14 无 tier(始终原配色)
+    case 'gltf':
+      // 精细化美术资产(外部 glb)。GltfTankAsset 必须 main 启动时已 load。
+      return new GltfTank(physics, render, spawn, yaw);
     case 'tiger':
       return new TigerTank(physics, render, spawn, yaw, tier);
     case 'abrams':

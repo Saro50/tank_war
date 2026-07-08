@@ -480,6 +480,9 @@ export const CONFIG = {
    */
   tanks: [
     // 地图扩大一倍,所有坦克出生坐标 ×2,拉开战场纵深
+    // 玩家 T-14 程序化坦克(数据驱动:TankDataStore → convertT14ToModel → buildCustom)。
+    // glb 美术资产实验暂搁置(config/main/registry 的 gltf 接线保留,切回改 'gltf' 即可):
+    // { variant: 'gltf', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
     { variant: 't14', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
     // 静态展示坦克(可破坏靶子,team:neutral=NPC 不主动攻击)
     { variant: 'tiger', spawn: { x: -16, y: 0, z: -60 }, yaw: 0, player: false, team: 'neutral' },

@@ -27,6 +27,7 @@ import { HUD } from './ui/HUD';
 import { Logger } from './utils/Logger';
 import { initDebugFlag, isDebug } from './utils/debug';
 import { TankDataStore } from './data/TankDataStore';
+// import { GltfTankAsset } from './entities/GltfTankAsset'; // gltf 实验暂搁置(config 玩家坦克已切回 t14)
 
 const log = Logger.create('main');
 
@@ -81,6 +82,17 @@ async function main(): Promise<void> {
   // 必须在 buildTanks 前:B 阶段起 TankVisualBuilder 从此取数据渲染,
   // 数据未就绪则构建会抛错。当前 buildVisuals 仍读 CONFIG(过渡期,零回归)。
   await TankDataStore.load();
+
+  // glb 美术资产预加载(实验暂搁置:config 玩家坦克已切回 t14)。
+  // 切回 gltf 实验:config.ts variant 改 'gltf' + 取消下行注释(注意路径已修正 assets)。
+  // const hasGltfVariant = (CONFIG.tanks as Array<{variant:string}>).some((t) => t.variant === 'gltf');
+  // if (hasGltfVariant) {
+  //   try {
+  //     await GltfTankAsset.load(`${import.meta.env.BASE_URL}assets/game_ready_tank.glb`);
+  //   } catch (e) {
+  //     log.error('glb asset load failed, GltfTank will error on build', { err: String(e) });
+  //   }
+  // }
   const render = new RenderScene(container);
   const hud = new HUD(container);
 

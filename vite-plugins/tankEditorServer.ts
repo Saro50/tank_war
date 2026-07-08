@@ -19,10 +19,11 @@
  *  PUT  /api/tanks/:variant   → 写入 editor-dist(body=JSON,需通过 schema)
  */
 import type { Plugin } from 'vite';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
+import { resolve, sep } from 'path';
 import type { IncomingMessage, ServerResponse } from 'http';
-import { TANK_VARIANTS, TankSchemaByVariant, type TankVariant } from '../src/data/TankSchema';
+import { TANK_VARIANTS, TankSchemaByVariant, TankModelSchema, type TankVariant, type TankModel } from '../src/data/TankSchema';
+import { blankTemplate, fromOfficial } from '../src/editor/templates';
 
 /** 编辑器产物区(后台写入,开发者手动采纳到 public) */
 const EDITOR_DIST_DIR = resolve(process.cwd(), 'editor-dist/tanks');
@@ -63,8 +64,10 @@ export function tankEditorServer(): Plugin {
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         const path = (req.url ?? '').split('?')[0];
-        // 只处理 /api/tanks 开头的请求,其他放行
-        if (path !== '/api/tanks' && !path.startsWith('/api/tanks/')) {
+        // 处理 /api/tanks(官方) + /api/custom-tanks(自定义),其他放行给 vite
+        const isTankApi = path === '/api/tanks' || path.startsWith('/api/tanks/') ||
+                          path === '/api/custom-tanks' || path.startsWith('/api/custom-tanks/');
+        if (!isTankApi) {
           next();
           return;
         }
@@ -82,6 +85,12 @@ export function tankEditorServer(): Plugin {
 
 /** 处理 API 请求(已确定 path 以 /api/tanks 开头) */
 async function handleApi(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  // 自定义坦克路由组(优先匹配,避免与 /api/tanks 的 segs 解析冲突)
+  if (path === '/api/custom-tanks' || path.startsWith('/api/custom-tanks/')) {
+    await handleCustomTanks(req, res, path);
+    return;
+  }
+
   const segs = path.split('/').filter(Boolean); // ['api','tanks'] 或 ['api','tanks','t14']
   const method = req.method ?? 'GET';
 
@@ -159,4 +168,191 @@ async function handlePut(variant: TankVariant, req: IncomingMessage, res: Server
   writeFileSync(outPath, JSON.stringify(parsed.data, null, 2) + '\n', 'utf8');
   console.info(`[tank-editor-server] saved ${variant} → editor-dist/tanks/${variant}.json`);
   jsonRes(res, 200, { ok: true, variant, path: `editor-dist/tanks/${variant}.json` });
+}
+
+// ============================================================
+// 自定义坦克 CRUD(/api/custom-tanks*)
+// ============================================================
+// 自定义坦克存 editor-dist/tanks/custom-*.json(与官方旧 JSON 前缀隔离)。
+// id 规则:custom-<base36时间戳>,后台生成(防前端冲突)。
+// 安全三重防御:① 正则白名单 ② resolve 后校验在目录内 ③ 拒绝 ..。
+
+const CUSTOM_ID_RE = /^custom-[a-z0-9-]{1,40}$/;
+
+/** 校验自定义 id 合法(正则白名单,防路径遍历) */
+function isCustomId(id: string): boolean {
+  return CUSTOM_ID_RE.test(id);
+}
+
+/** 拼自定义 JSON 路径 + 防御:resolve 后必须仍在 EDITOR_DIST_DIR 内(防 ../) */
+function customFilePath(id: string): string {
+  const p = resolve(EDITOR_DIST_DIR, `${id}.json`);
+  const root = EDITOR_DIST_DIR + sep;
+  if (!p.startsWith(root)) {
+    throw new Error(`path traversal detected: ${id}`);
+  }
+  return p;
+}
+
+/** 生成唯一自定义 id(custom-<base36时间戳>,冲突时加随机后缀) */
+function generateCustomId(): string {
+  let id = 'custom-' + Date.now().toString(36);
+  while (existsSync(customFilePath(id))) {
+    id = 'custom-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  }
+  return id;
+}
+
+/** 提取列表元数据(只取 id/name/parts 数/质量/静态,避免读全文) */
+function customListMeta(filePath: string): { id: string; name: string; partsCount: number; mass: number; isStatic: boolean } | null {
+  try {
+    const raw = JSON.parse(readFileSync(filePath, 'utf8'));
+    return {
+      id: raw.id,
+      name: raw.name,
+      partsCount: raw.parts?.length ?? 0,
+      mass: raw.mass ?? 0,
+      isStatic: raw.isStatic ?? false,
+    };
+  } catch {
+    return null; // 损坏文件跳过(列表扫描容忍单个坏文件,不阻断整体)
+  }
+}
+
+/** 处理 /api/custom-tanks* 路由组 */
+async function handleCustomTanks(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  const segs = path.split('/').filter(Boolean); // ['api','custom-tanks'] 或 ['api','custom-tanks','custom-xxx']
+  const method = req.method ?? 'GET';
+
+  // GET /api/custom-tanks → 列表(扫描目录 custom-*.json)
+  if (segs.length === 2 && method === 'GET') {
+    mkdirSync(EDITOR_DIST_DIR, { recursive: true });
+    const files = readdirSync(EDITOR_DIST_DIR).filter((f) => f.startsWith('custom-') && f.endsWith('.json'));
+    const tanks = files
+      .map((f) => customListMeta(resolve(EDITOR_DIST_DIR, f)))
+      .filter((m): m is NonNullable<typeof m> => m !== null);
+    jsonRes(res, 200, { tanks });
+    return;
+  }
+
+  // POST /api/custom-tanks → 新建(生成 id + 初始 model)
+  if (segs.length === 2 && method === 'POST') {
+    await handleCustomCreate(req, res);
+    return;
+  }
+
+  // /api/custom-tanks/:id
+  if (segs.length === 3) {
+    const id = segs[2];
+    if (!isCustomId(id)) {
+      jsonRes(res, 400, { error: `invalid custom id: ${id}` });
+      return;
+    }
+    if (method === 'GET') {
+      handleCustomGet(id, res);
+      return;
+    }
+    if (method === 'PUT') {
+      await handleCustomPut(id, req, res);
+      return;
+    }
+    if (method === 'DELETE') {
+      handleCustomDelete(id, res);
+      return;
+    }
+    jsonRes(res, 405, { error: `method ${method} not allowed` });
+    return;
+  }
+
+  jsonRes(res, 404, { error: 'not found', path });
+}
+
+/** GET 单个:读 custom-*.json */
+function handleCustomGet(id: string, res: ServerResponse): void {
+  const fp = customFilePath(id);
+  if (!existsSync(fp)) {
+    jsonRes(res, 404, { error: `${id} not found` });
+    return;
+  }
+  const content = readFileSync(fp, 'utf8');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('X-Data-Source', 'editor-dist');
+  res.end(content);
+}
+
+/** POST 新建:body={name, basedOn?} → 生成 id + 初始 model → 返回 id */
+async function handleCustomCreate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readBody(req);
+  let parsed: { name?: string; basedOn?: TankVariant };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    jsonRes(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+  const name = parsed.name?.trim();
+  if (!name) {
+    jsonRes(res, 400, { error: 'name required' });
+    return;
+  }
+  // 初始 model:basedOn 指定官方车型复制,否则空白模板
+  let model: TankModel;
+  try {
+    model = parsed.basedOn ? fromOfficial(parsed.basedOn) : blankTemplate(name);
+  } catch (e) {
+    jsonRes(res, 500, { error: 'template generation failed', message: String(e) });
+    return;
+  }
+  model.name = name;
+  model.id = generateCustomId();
+  // schema 校验(模板应合法,防御)
+  const validated = TankModelSchema.safeParse(model);
+  if (!validated.success) {
+    jsonRes(res, 500, {
+      error: 'template schema invalid',
+      issues: validated.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+    });
+    return;
+  }
+  mkdirSync(EDITOR_DIST_DIR, { recursive: true });
+  writeFileSync(customFilePath(model.id), JSON.stringify(validated.data, null, 2) + '\n', 'utf8');
+  console.info(`[tank-editor-server] created custom tank ${model.id} (${name})`);
+  jsonRes(res, 200, { id: model.id, name });
+}
+
+/** PUT 保存:schema 校验后写盘(URL id 不可被 body 篡改) */
+async function handleCustomPut(id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readBody(req);
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    jsonRes(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+  const parsed = TankModelSchema.safeParse(data);
+  if (!parsed.success) {
+    jsonRes(res, 400, {
+      error: 'schema validation failed',
+      issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+    });
+    return;
+  }
+  const validated = { ...parsed.data, id }; // 强制 id 一致
+  mkdirSync(EDITOR_DIST_DIR, { recursive: true });
+  writeFileSync(customFilePath(id), JSON.stringify(validated, null, 2) + '\n', 'utf8');
+  console.info(`[tank-editor-server] saved custom tank ${id}`);
+  jsonRes(res, 200, { ok: true, id });
+}
+
+/** DELETE:删 custom-*.json */
+function handleCustomDelete(id: string, res: ServerResponse): void {
+  const fp = customFilePath(id);
+  if (!existsSync(fp)) {
+    jsonRes(res, 404, { error: `${id} not found` });
+    return;
+  }
+  unlinkSync(fp);
+  console.info(`[tank-editor-server] deleted custom tank ${id}`);
+  jsonRes(res, 200, { ok: true, id });
 }

@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tank Model Viewer — 精细化资产验证</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #0b0f14;
+        color: #e6e6e6;
+        font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      }
+      #app {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+      canvas {
+        display: block;
+      }
+
+      /* 顶部统计面板 */
+      #stats {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        background: rgba(20, 22, 28, 0.88);
+        border: 1px solid #2a2c32;
+        border-radius: 6px;
+        padding: 12px 16px;
+        font-size: 12px;
+        line-height: 1.7;
+        min-width: 280px;
+        pointer-events: none;
+        backdrop-filter: blur(6px);
+      }
+      #stats h3 {
+        margin: 0 0 8px 0;
+        font-size: 13px;
+        color: #ffcc33;
+        font-weight: bold;
+      }
+      #stats .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      #stats .label {
+        color: #888;
+      }
+      #stats .val {
+        color: #e6e6e6;
+        font-variant-numeric: tabular-nums;
+      }
+      #stats .val.good {
+        color: #7fff7f;
+      }
+      #stats .val.warn {
+        color: #ffaa44;
+      }
+      #stats .val.bad {
+        color: #ff6666;
+      }
+
+      /* PBR 贴图分析区块(精细化核心指标) */
+      #pbr-analysis {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px dashed #3a3c42;
+      }
+      #pbr-analysis .title {
+        color: #aaa;
+        font-size: 11px;
+        margin-bottom: 4px;
+        text-transform: uppercase;
+      }
+      .pbr-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .pbr-bar .name {
+        width: 96px;
+        color: #888;
+      }
+      .pbr-bar .meter {
+        flex: 1;
+        height: 8px;
+        background: #1a1c22;
+        border-radius: 4px;
+        overflow: hidden;
+        position: relative;
+      }
+      .pbr-bar .fill {
+        height: 100%;
+        background: linear-gradient(90deg, #ff6666, #ffaa44, #7fff7f);
+        transition: width 0.3s;
+      }
+      .pbr-bar .pct {
+        width: 52px;
+        text-align: right;
+        color: #ccc;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* 骨骼动画控制区块(有动画时显示) */
+      #anim-section {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px dashed #3a3c42;
+        pointer-events: auto; /* stats 是 none,这里按钮要可点 */
+      }
+      #anim-section.hidden {
+        display: none;
+      }
+      #anim-section .title {
+        color: #aaa;
+        font-size: 11px;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+      }
+      .anim-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-bottom: 8px;
+        max-width: 280px;
+      }
+      .anim-item {
+        background: #22242a;
+        color: #aaa;
+        border: 1px solid #3a3c42;
+        border-radius: 3px;
+        padding: 3px 8px;
+        font-size: 11px;
+        cursor: pointer;
+        font-family: inherit;
+        transition: all 0.15s;
+      }
+      .anim-item:hover {
+        background: #2a2c32;
+        color: #ccc;
+      }
+      .anim-item.active {
+        background: #2a3a4a;
+        color: #4aafff;
+        border-color: #3a5a7a;
+      }
+      .anim-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+        font-size: 11px;
+      }
+      .anim-row label {
+        color: #888;
+        min-width: 50px;
+      }
+      .anim-row input[type='range'] {
+        flex: 1;
+        accent-color: #4a8aff;
+        height: 4px;
+      }
+      .anim-row .speed-val {
+        color: #ccc;
+        font-variant-numeric: tabular-nums;
+        min-width: 32px;
+        text-align: right;
+      }
+      .anim-play-btn {
+        background: #2a3a2a;
+        color: #7fff7f;
+        border: 1px solid #3a5a3a;
+        border-radius: 4px;
+        padding: 4px 12px;
+        font-family: inherit;
+        font-size: 11px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .anim-play-btn:hover {
+        background: #3a5a3a;
+      }
+      .anim-play-btn.paused {
+        background: #3a2a2a;
+        color: #ffaa44;
+        border-color: #5a3a3a;
+      }
+      .anim-loop-group {
+        display: flex;
+        gap: 3px;
+      }
+      .anim-loop-btn {
+        background: #22242a;
+        color: #888;
+        border: 1px solid #3a3c42;
+        border-radius: 3px;
+        padding: 3px 8px;
+        font-size: 10px;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .anim-loop-btn.active {
+        background: #2a3a4a;
+        color: #4aafff;
+        border-color: #3a5a7a;
+      }
+      .anim-progress {
+        margin-top: 6px;
+        height: 4px;
+        background: #1a1c22;
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .anim-progress-fill {
+        height: 100%;
+        background: #4aafff;
+        width: 0%;
+        transition: width 0.05s linear;
+      }
+
+      /* 底部控制条 */
+      #controls {
+        position: absolute;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 8px;
+        background: rgba(20, 22, 28, 0.88);
+        border: 1px solid #2a2c32;
+        border-radius: 8px;
+        padding: 8px;
+        backdrop-filter: blur(6px);
+      }
+      #controls button {
+        background: #22242a;
+        color: #ccc;
+        border: 1px solid #3a3c42;
+        border-radius: 4px;
+        padding: 6px 14px;
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      #controls button:hover {
+        background: #2a3a2a;
+        color: #7fff7f;
+        border-color: #3a5a3a;
+      }
+      #controls button.active {
+        background: #2a3a2a;
+        color: #7fff7f;
+        border-color: #3a5a3a;
+      }
+
+      /* 拖拽提示遮罩 */
+      #dropzone {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+        pointer-events: none;
+        transition: all 0.2s;
+      }
+      #dropzone.hidden {
+        display: none;
+      }
+      #dropzone .icon {
+        font-size: 64px;
+        opacity: 0.4;
+      }
+      #dropzone .title {
+        font-size: 20px;
+        color: #ccc;
+        font-weight: bold;
+      }
+      #dropzone .hint {
+        font-size: 13px;
+        color: #666;
+        text-align: center;
+        line-height: 1.8;
+        max-width: 420px;
+      }
+      #dropzone .hint a {
+        color: #4a8aff;
+        text-decoration: none;
+      }
+      #dropzone .hint a:hover {
+        text-decoration: underline;
+      }
+
+      /* 拖拽中高亮 */
+      #app.dragover #dropzone {
+        background: rgba(74, 138, 255, 0.1);
+      }
+      #app.dragover #dropzone .icon {
+        opacity: 1;
+        transform: scale(1.1);
+      }
+
+      /* 加载中 */
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(20, 22, 28, 0.92);
+        border: 1px solid #2a2c32;
+        border-radius: 8px;
+        padding: 20px 32px;
+        font-size: 14px;
+        display: none;
+      }
+      #loading.show {
+        display: block;
+      }
+
+      /* 错误提示 */
+      #error {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        background: rgba(60, 20, 20, 0.92);
+        border: 1px solid #5a2a2a;
+        border-radius: 6px;
+        padding: 12px 16px;
+        font-size: 12px;
+        max-width: 360px;
+        display: none;
+        pointer-events: auto;
+      }
+      #error.show {
+        display: block;
+      }
+      #error .title {
+        color: #ff8888;
+        font-weight: bold;
+        margin-bottom: 4px;
+      }
+      #error .msg {
+        color: #cca;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <!-- 顶部统计 -->
+      <div id="stats">
+        <h3>模型统计</h3>
+        <div class="row"><span class="label">状态</span><span class="val" id="st-status">等待加载</span></div>
+        <div class="row"><span class="label">文件</span><span class="val" id="st-file">—</span></div>
+        <div class="row"><span class="label">加载耗时</span><span class="val" id="st-loadtime">—</span></div>
+        <div class="row"><span class="label">三角面</span><span class="val" id="st-tris">—</span></div>
+        <div class="row"><span class="label">顶点</span><span class="val" id="st-verts">—</span></div>
+        <div class="row"><span class="label">Mesh 数</span><span class="val" id="st-meshes">—</span></div>
+        <div class="row"><span class="label">材质数</span><span class="val" id="st-materials">—</span></div>
+        <div class="row"><span class="label">纹理数</span><span class="val" id="st-textures">—</span></div>
+        <div class="row"><span class="label">包围盒</span><span class="val" id="st-size">—</span></div>
+        <div class="row"><span class="label">FPS</span><span class="val" id="st-fps">—</span></div>
+
+        <!-- PBR 贴图分析:验证精细化的核心指标 -->
+        <div id="pbr-analysis">
+          <div class="title">PBR 贴图使用率(精细化指标)</div>
+          <div class="pbr-bar">
+            <span class="name">BaseColor</span>
+            <div class="meter"><div class="fill" id="pbr-base" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-base-pct">—</span>
+          </div>
+          <div class="pbr-bar">
+            <span class="name">Normal 法线</span>
+            <div class="meter"><div class="fill" id="pbr-normal" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-normal-pct">—</span>
+          </div>
+          <div class="pbr-bar">
+            <span class="name">Roughness 粗糙</span>
+            <div class="meter"><div class="fill" id="pbr-rough" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-rough-pct">—</span>
+          </div>
+          <div class="pbr-bar">
+            <span class="name">Metalness 金属</span>
+            <div class="meter"><div class="fill" id="pbr-metal" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-metal-pct">—</span>
+          </div>
+          <div class="pbr-bar">
+            <span class="name">AO 遮蔽</span>
+            <div class="meter"><div class="fill" id="pbr-ao" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-ao-pct">—</span>
+          </div>
+          <div class="pbr-bar">
+            <span class="name">Emissive 自发光</span>
+            <div class="meter"><div class="fill" id="pbr-emiss" style="width: 0%"></div></div>
+            <span class="pct" id="pbr-emiss-pct">—</span>
+          </div>
+        </div>
+
+        <!-- 骨骼动画控制(模型含动画时显示) -->
+        <div id="anim-section" class="hidden">
+          <div class="title">骨骼动画</div>
+          <div class="row"><span class="label">动画数</span><span class="val" id="an-count">—</span></div>
+          <div class="row"><span class="label">骨骼数</span><span class="val" id="an-bones">—</span></div>
+          <div class="anim-list" id="an-list"></div>
+          <div class="anim-row">
+            <button class="anim-play-btn" id="an-play">⏸ 暂停</button>
+            <label>速度</label>
+            <input type="range" id="an-speed" min="0.1" max="2" step="0.1" value="1" />
+            <span class="speed-val" id="an-speed-val">1.0x</span>
+          </div>
+          <div class="anim-row">
+            <label>循环</label>
+            <div class="anim-loop-group">
+              <button class="anim-loop-btn" data-loop="once">单次</button>
+              <button class="anim-loop-btn active" data-loop="repeat">循环</button>
+              <button class="anim-loop-btn" data-loop="pingpong">往返</button>
+            </div>
+          </div>
+          <div class="anim-progress"><div class="anim-progress-fill" id="an-progress"></div></div>
+        </div>
+      </div>
+
+      <!-- 拖拽提示 -->
+      <div id="dropzone">
+        <div class="icon">📦</div>
+        <div class="title">拖入 glTF / glb 模型文件</div>
+        <div class="hint">
+          把下载的坦克模型(<code>.glb</code> / <code>.gltf</code>)直接拖到这里<br />
+          推荐 Sketchfab 上搜 "tank" 筛选 CC 协议 + 可下载<br />
+          优先选 <b>面数低、带 PBR 贴图</b> 的 game-ready 模型<br /><br />
+          提示:可直接拖 <code>.glb</code>(单文件);<br />
+          <code>.gltf</code>+外部资源需整文件夹拖入(实验性)
+        </div>
+      </div>
+
+      <!-- 加载中 -->
+      <div id="loading">⏳ 加载中…</div>
+
+      <!-- 错误 -->
+      <div id="error">
+        <div class="title">⚠ 加载失败</div>
+        <div class="msg" id="error-msg"></div>
+      </div>
+
+      <!-- 底部控制 -->
+      <div id="controls">
+        <button id="btn-open">📂 打开文件</button>
+        <button id="btn-wireframe">🔲 线框模式</button>
+        <button id="btn-grid" class="active">📐 网格地面</button>
+        <button id="btn-reset">🎯 复位视角</button>
+        <button id="btn-rotate">🔄 自动旋转</button>
+      </div>
+
+      <input type="file" id="file-input" accept=".glb,.gltf" style="display: none" />
+    </div>
+    <script type="module" src="/src/viewer/viewer.ts"></script>
+  </body>
+</html>

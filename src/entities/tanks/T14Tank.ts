@@ -7,6 +7,7 @@ import type { Fragment } from '../Destructible';
 import { TankBase, type TankSpec, type TankVisuals } from './TankBase';
 import { TankDataStore } from '../../data/TankDataStore';
 import { TankVisualBuilder } from '../TankVisualBuilder';
+import { convertT14ToModel } from '../../data/convertLegacy';
 
 /**
  * 玩家 T-14 坦克
@@ -72,12 +73,22 @@ export class T14Tank extends TankBase {
   }
 
   /**
-   * 视觉构建:委托 TankVisualBuilder(唯一真相源)。
-   * 数据从 TankDataStore 取(运行时 JSON),保证与编辑器预览完全一致。
+   * 视觉构建:Phase C 起改用 buildCustom(数据驱动部件组合式)。
+   * 流程:TankDataStore 取 T14Data → convertT14ToModel 转 TankModel → buildCustom 构建。
+   * 与原 buildT14 等价(零回归):convertT14FromConfig 验证 mesh 数对齐,buildCustom 分配逻辑核对通过。
    */
   protected buildVisuals(): TankVisuals {
     const data = TankDataStore.getT14();
-    const built = TankVisualBuilder.buildT14(data, { camoSeed: this.id });
+    const model = convertT14ToModel(data, {
+      mass: CONFIG.tank.mass,
+      maxHp: CONFIG.tank.damage.maxHp,
+      damage: {
+        smokeThreshold: CONFIG.tank.damage.smokeThreshold,
+        destroyExplosionScale: CONFIG.tank.damage.destroyExplosionScale,
+        destroySmokeScale: CONFIG.tank.damage.destroySmokeScale,
+      },
+    });
+    const built = TankVisualBuilder.buildCustom(model, { camoSeed: this.id });
     return {
       group: built.group,
       hullSway: built.hullSway,

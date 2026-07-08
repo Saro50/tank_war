@@ -26,6 +26,7 @@ import {
   BufferGeometry,
   CanvasTexture,
   CylinderGeometry,
+  Float32BufferAttribute,
   Group,
   Material,
   Mesh,
@@ -45,7 +46,7 @@ import {
   makeWedgeTurretGeometry,
   type CamoParams,
 } from './TankGeometryFactories';
-import type { T14Data, TigerData, AbramsData } from '../data/TankSchema';
+import type { T14Data, TigerData, AbramsData, TankModel, TankPart, MaterialKey, PartType } from '../data/TankSchema';
 
 // ============================================================
 // 类型定义
@@ -685,6 +686,265 @@ function buildAbrams(data: AbramsData, ctx: BuildContext): BuiltVisuals {
 }
 
 // ============================================================
+// buildCustom:从 TankModel(部件组合式)构建视觉(Phase B)
+// ============================================================
+// 数据驱动版:遍历 TankModel.parts,按 shape 选几何工厂,按 materialKey 查顶层材质,
+// 按 mateTo 构建 group 层级,instances 展开重复件。与 buildT14/buildTiger/buildAbrams 等价
+// (现有3车型经 convertLegacy 转 TankModel 后,buildCustom 应视觉零回归)。
+//
+// 调用方:
+//  - Phase C 游戏集成:TankDataStore 加载 → convertLegacy → buildCustom(替代 buildT14 等)
+//  - 编辑器:rebuild 时用 buildCustom 渲染当前 TankModel
+//
+// 层级结构(零回归必需):
+//  - 动态坦克(!isStatic): group → hullSway(车身摇) + trackGroup(履带接地不摇)
+//                         hullSway → turret(炮塔主体+附件) + 车体 part
+//                         turret → barrel group(炮管俯仰) + 炮塔级 part
+//  - 静态坦克(isStatic):  group → 所有 root part + turret(无摇晃)
+//  hullSway/trackGroup 是运行时视觉特效载体,由实体(T14Tank)驱动摇晃;静态坦克不建。
+// ============================================================
+
+/** partType → materialKey 默认映射(缺省材质推断,可被 part.materialKey 覆盖)。 */
+const PART_TYPE_TO_MATERIAL: Record<PartType, MaterialKey> = {
+  hull: 'hull',
+  turret: 'turret',
+  barrel: 'barrel',
+  track: 'trackMetal',
+  wheel: 'wheelRubber',
+  decorative: 'detail',
+};
+
+/** 弧面圆柱:截取一段圆柱面(CylinderGeometry thetaStart/thetaLength)+ 两端径向封口矩形(防开口看到背面)。
+ *  用于弧形装甲/铸造首上等单曲曲面。封口法线朝外(弧面外侧,沿切线方向)。 */
+function makeArcCylinderGeometry(radius: number, height: number, segments: number, thetaStart: number, thetaLength: number): BufferGeometry {
+  const yT = height / 2, yB = -height / 2;
+  const cyl = new CylinderGeometry(radius, radius, height, segments, 1, false, thetaStart, thetaLength);
+  const positions: number[] = Array.from(cyl.attributes.position.array);
+  const normals: number[] = Array.from(cyl.attributes.normal.array);
+  const indices: number[] = [];
+  if (cyl.index) {
+    const idx = cyl.index.array;
+    for (let i = 0; i < idx.length; i++) indices.push(idx[i]);
+  }
+  let offset = positions.length / 3;
+  // 两端径向封口矩形(轴心 → 弧面端点,高度=height)
+  for (const theta of [thetaStart, thetaStart + thetaLength]) {
+    const cx = Math.cos(theta), cz = Math.sin(theta);
+    const px = radius * cx, pz = radius * cz;
+    // 封口法线 = 切线方向(垂直径向);端1(thetaStart)朝 -theta 外,端2 朝 +theta 外
+    const dir = (theta === thetaStart) ? -1 : 1;
+    const nx = -cz * dir, nz = cx * dir;
+    positions.push(0, yT, 0, 0, yB, 0, px, yB, pz, px, yT, pz);
+    normals.push(nx, 0, nz, nx, 0, nz, nx, 0, nz, nx, 0, nz);
+    indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
+    offset += 4;
+  }
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new Float32BufferAttribute(normals, 3));
+  geo.setIndex(indices);
+  return geo;
+}
+
+/** 按 part.shape 生成几何(工厂映射)。
+ *  box → BoxGeometry;cylinder:arc 缺省 → 完整圆柱,有 arc → 弧面截取(弧形曲面装甲)。 */
+function makePartGeometry(part: TankPart): BufferGeometry {
+  if (part.shape === 'box') {
+    return new BoxGeometry(part.half!.x * 2, part.half!.y * 2, part.half!.z * 2);
+  }
+  if (part.shape === 'cylinder') {
+    if (part.arc) {
+      return makeArcCylinderGeometry(part.radius!, part.height!, part.segments ?? 16, part.arc.start, part.arc.length);
+    }
+    return new CylinderGeometry(part.radius!, part.radius!, part.height!, part.segments ?? 16);
+  }
+  // wedge
+  return makeWedgeByMode(part.wedge!);
+}
+
+/** wedge 按 mode 分发到对应几何工厂(symmetric/asymmetric/glacis)。 */
+function makeWedgeByMode(w: NonNullable<TankPart['wedge']>): BufferGeometry {
+  if (w.mode === 'symmetric') {
+    return makeWedgeGeometry({
+      bottomHalfX: w.bottomHalfX, topHalfX: w.topHalfX,
+      bottomHalfZ: w.bottomHalfZ, topHalfZ: w.topHalfZ,
+      height: w.height, centerY: w.centerY,
+    });
+  }
+  if (w.mode === 'asymmetric') {
+    return makeWedgeTurretGeometry({
+      bottomHalfX: w.bottomHalfX, topHalfX: w.topHalfX,
+      bottomHalfZ: w.bottomHalfZ, frontHalfZ: w.frontHalfZ, backHalfZ: w.backHalfZ,
+      height: w.height, centerY: w.centerY,
+    });
+  }
+  // glacis
+  return makeGlacisGeometry(w.halfX, w.halfDepth, w.halfHeight);
+}
+
+/** 为一个 part 生成 mesh(含 instances 展开,共享几何/材质),挂到 parent。 */
+function addPartMeshes(
+  res: BuiltResources,
+  parent: Object3D,
+  part: TankPart,
+  resolveMat: (p: TankPart) => Material,
+  baseOffset?: { x: number; y: number; z: number },
+): void {
+  const geo = makePartGeometry(part);
+  res.geometries.push(geo);
+  const material = resolveMat(part);
+  const instances = part.instances ?? [{ dx: 0, dy: 0, dz: 0 }];
+  // baseOffset:反扁平用(主炮管级 part 挂 barrel group 时,position 减 barrel group 原点)
+  const bx = part.position.x - (baseOffset?.x ?? 0);
+  const by = part.position.y - (baseOffset?.y ?? 0);
+  const bz = part.position.z - (baseOffset?.z ?? 0);
+  for (const off of instances) {
+    const mesh = new Mesh(geo, material);
+    mesh.position.set(bx + off.dx, by + off.dy, bz + off.dz);
+    if (part.rotation) mesh.rotation.set(part.rotation.x, part.rotation.y, part.rotation.z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    // 标 partId/partType 到 userData(供编辑器点选拾取反查 part;游戏不读此字段,无副作用)
+    mesh.userData.partId = part.id;
+    mesh.userData.partType = part.partType;
+    parent.add(mesh);
+  }
+}
+
+function buildCustom(model: TankModel, ctx: BuildContext): BuiltVisuals {
+  const res = newResources();
+  const camo = resolveCamo(model.camo, ctx.camoOverride);
+
+  // —— 材质(顶层 model.materials 色 + camo 纹理 + 固定 PBR 预设,与 buildT14 等一致)——
+  const camoCanvas = makeCamouflageCanvas(camo, { seed: ctx.camoSeed });
+  const hullCamoTex = tex(res, camoCanvas, 3, 2);
+  const turretCamoTex = tex(res, camoCanvas, 4, 1);
+  const trackRep = model.trackTexRepeat ?? 6;
+  const leftTrackTex = makeTrackTexture(trackRep);
+  const rightTrackTex = makeTrackTexture(trackRep);
+  res.textures.push(leftTrackTex, rightTrackTex);
+
+  const cm = model.materials;
+  const mats: Record<MaterialKey, MeshStandardMaterial> = {
+    hull:        mat(res, { map: hullCamoTex,   roughness: 0.88, metalness: 0.1 }),
+    turret:      mat(res, { map: turretCamoTex, roughness: 0.82, metalness: 0.1 }),
+    trackMetal:  mat(res, { map: leftTrackTex,  roughness: 0.55, metalness: 0.5 }),
+    wheelRubber: mat(res, { color: cm.wheelRubber, roughness: 0.95, metalness: 0 }),
+    wheelHub:    mat(res, { color: cm.wheelHub,    roughness: 0.5,  metalness: 0.6 }),
+    barrel:      mat(res, { color: cm.barrel,      roughness: 0.5,  metalness: 0.6 }),
+    mantlet:     mat(res, { color: cm.mantlet,     roughness: 0.55, metalness: 0.5 }),
+    detail:      mat(res, { color: cm.detail,      roughness: 0.6,  metalness: 0.4 }),
+    fender:      mat(res, { color: cm.fender,      roughness: 0.86, metalness: 0.1 }),
+  };
+  // 右履带材质(独立纹理实例,供实体分别滚动左右履带;零回归必需)
+  const rightTrackMat = mat(res, { map: rightTrackTex, roughness: 0.55, metalness: 0.5 });
+
+  const resolveMat = (part: TankPart): Material => {
+    const key = part.materialKey ?? PART_TYPE_TO_MATERIAL[part.partType];
+    // 履带左右纹理独立(T14 履带滚动):role 优先识别左右,无 role 时 position.x 兜底(向后兼容)
+    if (key === 'trackMetal') {
+      if (part.role === 'right-track') return rightTrackMat;
+      if (part.role === 'left-track') return mats.trackMetal;
+      return part.position.x > 0 ? rightTrackMat : mats.trackMetal;
+    }
+    return mats[key];
+  };
+
+  // —— group 层级 ——
+  const isStatic = model.isStatic ?? false;
+  const group = new Group();
+  const hullSway = isStatic ? undefined : new Group();
+  const trackGroup = isStatic ? undefined : new Group();
+  if (hullSway) group.add(hullSway);
+  if (trackGroup) group.add(trackGroup);
+
+  const turret = new Group();
+  const barrel = new Group();
+  turret.add(barrel);
+  (hullSway ?? group).add(turret);
+
+  // —— 炮塔主体特殊处理 ——
+  // 炮塔主体(role='turret-body')的 position 是 turret group 的定位;
+  // 其 mesh 挂 turret group 中心(position=0,wedge.centerY 含几何偏移)。
+  // 其他炮塔级 part(mateTo='turret')的 position 是相对 turret group 的偏移。
+  const turretBody = model.parts.find((p) => p.role === 'turret-body');
+  if (turretBody) {
+    turret.position.set(turretBody.position.x, turretBody.position.y, turretBody.position.z);
+    addPartMeshes(res, turret, { ...turretBody, position: { x: 0, y: 0, z: 0 } }, resolveMat);
+  }
+
+  // —— barrel group 定位(炮管组件俯仰中心,修子弹方向 + 俯仰绕根部)——
+  // 转换器:主炮管级 part(barrel/mantlet/fume/muzzle/thermal/muzzle-brake)mateTo='barrel',
+  //         position 含 barrel.offset(扁平);机枪管(mg/rcws)mateTo='turret' 独立不随主炮俯仰。
+  // barrel group 定位到炮管根部(=俯仰中心):part.pivot 优先(支持非 z 轴炮管,自定义用),
+  //   缺省从主炮管(role='main-barrel')position 沿 -z 回退 height/2(假设沿 z 轴,现有3车型成立)。
+  const barrelAnchor = model.parts.find((p) => p.role === 'main-barrel');
+  const barrelGroupPos = barrelAnchor
+    ? (barrelAnchor.pivot ?? { x: barrelAnchor.position.x, y: barrelAnchor.position.y, z: barrelAnchor.position.z - (barrelAnchor.height ?? 0) / 2 })
+    : { x: 0, y: 0, z: 0 };
+  if (barrelAnchor) barrel.position.set(barrelGroupPos.x, barrelGroupPos.y, barrelGroupPos.z);
+
+  // —— 遍历其余 parts,按 mateTo 分配 parent(协议语义驱动,不靠 id 硬编码)——
+  for (const part of model.parts) {
+    if (part === turretBody) continue;
+    let parent: Object3D;
+    let baseOffset: { x: number; y: number; z: number } | undefined;
+    if (part.mateTo === 'barrel') {
+      // 主炮管级(含主炮管自己):挂 barrel group + 反扁平(随俯仰)
+      parent = barrel;
+      baseOffset = barrelGroupPos;
+    } else if (part.mateTo === 'turret') {
+      // 炮塔级(含机枪管 mg/rcws,独立不随主炮俯仰)
+      parent = turret;
+    } else {
+      // root 级
+      if (isStatic) {
+        parent = group;
+      } else {
+        // 动态:track/wheel 接地不摇 → trackGroup;hull/decorative 随车身 → hullSway
+        parent = part.partType === 'track' || part.partType === 'wheel' ? trackGroup! : hullSway!;
+      }
+    }
+    addPartMeshes(res, parent, part, resolveMat, baseOffset);
+  }
+
+  // —— 贴花(编号 + 可选黑十字,复用现有 addNumberAndCrossDecals)——
+  if (model.decal) {
+    const tw = turretBody?.wedge;
+    const decalTurretBody =
+      tw && tw.mode !== 'glacis'
+        ? { bottomHalfX: tw.bottomHalfX, centerY: tw.centerY }
+        : { bottomHalfX: 1, centerY: 0.3 }; // 无炮塔主体时 fallback
+    addNumberAndCrossDecals(
+      res, turret, isStatic ? 'static' : 't14',
+      decalTurretBody,
+      model.decal.number,
+      { cross: model.decal.cross, crossColor: model.decal.crossColor },
+    );
+  }
+
+  // —— muzzle(炮口点,挂 barrel group 末端)——
+  // 相对 barrel group = (0,0,height):从根部沿炮管轴(+z)进 height = 炮口。
+  // 这样 muzzleWorldDirection = muzzle.world - barrel.world = (0,0,height) 经 barrel group 旋转 →
+  // 俯仰角决定方向(水平时纯 +z),不再含 barrel.offset 的 y 分量(修子弹偏上)。
+  const muzzle = new Object3D();
+  if (barrelAnchor) {
+    muzzle.position.set(0, 0, barrelAnchor.height ?? 0);
+  }
+  barrel.add(muzzle);
+
+  // barrelBaseZ(炮管根部 z,实体后坐力定位用)= barrel group 的 z(根部,相对 turret)
+  const barrelBaseZ = barrelGroupPos.z;
+
+  return {
+    group, hullSway, turret, barrel, muzzle,
+    leftTrackTex, rightTrackTex,
+    barrelBaseZ,
+    resources: res,
+  };
+}
+
+// ============================================================
 // 对外 API
 // ============================================================
 
@@ -692,6 +952,7 @@ export const TankVisualBuilder = {
   buildT14,
   buildTiger,
   buildAbrams,
+  buildCustom,
 
   /**
    * 释放资源(编辑器 rebuild 时释放旧模型;游戏实体销毁时也可用)。
