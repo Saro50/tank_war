@@ -11,6 +11,7 @@ import { NpcController, type NpcMission, type NpcTier, type Posture, resolveNpcP
 import type { ResupplySystem } from './ResupplySystem';
 import type { CaptureSystem } from './CaptureSystem';
 import { SkillSystem } from './SkillSystem';
+import type { SoundHooks } from '../audio/SoundSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Director');
@@ -61,9 +62,12 @@ export class DirectorSystem {
   /** 姿态评估计时(s) */
   private postureEvalTimer = 0;
   /** 占领军关卡的占领目标(占领点位置 + 巡逻半径)。setCaptureTarget 设置;
-   *  设后 pickPatrolMission 返回围绕占领点的 waypoints,NPC 自然在据点周围形成对抗。
-   *  undefined=歼灭战,用原 patrolAreas 轮询。 */
+    *  设后 pickPatrolMission 返回围绕占领点的 waypoints,NPC 自然在据点周围形成对抗。
+    *  undefined=歼灭战,用原 patrolAreas 轮询。 */
   private captureTarget?: { pos: { x: number; z: number }; radius: number };
+  /** 音效钩子(可选:注入到每个 NPC weapon,使 NPC 开火也有机械音)。
+   *  语音回调内部 isPlayer 过滤,NPC 不播人声;机械音所有坦克都发。 */
+  private sound?: SoundHooks;
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -96,6 +100,8 @@ export class DirectorSystem {
       const controller = new TankController(tank, this.render);
       // 每 NPC 独立的武器(shake=undefined:NPC 开火不震玩家相机)
       const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
+      // 注入音效(若已设):NPC 开火机械音;语音 isPlayer 过滤不播。setSoundHooks 在构造后调用时补注入
+      if (this.sound) weapon.setSoundHooks(this.sound);
       // 按档位(tier)解析难度参数注入;缺失回退 regular(老兵)
       const tierKey = (cfg as { tier?: string }).tier;
       const profile = resolveNpcProfile(tierKey);
@@ -161,6 +167,21 @@ export class DirectorSystem {
       radius,
       npcs: this.npcs.length,
     });
+  }
+
+  /**
+   * 注入音效钩子:存引用 + 补注入已存在的 NPC weapon。
+   * ------------------------------------------------------------
+   * main 在 sound 创建后调用。initNpcs 在 director 构造时已跑(早于 sound 创建),
+   * 其创建的 NPC weapon 当时无 sound → 此处补注入。后续 spawnEnemyAt 创建的
+   * weapon 在创建时即注入(构造分支内 if(this.sound))。
+   *
+   * 仅注入 weapon:开火机械音所有坦克都需发;语音回调内部 isPlayer 过滤,
+   * NPC controller/skill 不注入(其语音本就不该播)。
+   */
+  setSoundHooks(s: SoundHooks): void {
+    this.sound = s;
+    for (const w of this.npcWeapons) w.setSoundHooks(s);
   }
 
   /** step 前:所有 NPC 决策 + applyDrive */
@@ -247,6 +268,7 @@ export class DirectorSystem {
     tank.possess(); // fixed→dynamic 可驾驶
     const controller = new TankController(tank, this.render);
     const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
+    if (this.sound) weapon.setSoundHooks(this.sound); // 注入音效:NPC 开火机械音
     const profile = resolveNpcProfile(tier);
     // M3:veteran 注入技能(rookie/regular 不传,保持纯机械 AI)
     const skill = tier === 'veteran' ? new SkillSystem(() => tank) : undefined;

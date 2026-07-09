@@ -480,10 +480,10 @@ export const CONFIG = {
    */
   tanks: [
     // 地图扩大一倍,所有坦克出生坐标 ×2,拉开战场纵深
-    // 玩家 T-14 程序化坦克(数据驱动:TankDataStore → convertT14ToModel → buildCustom)。
-    // glb 美术资产实验暂搁置(config/main/registry 的 gltf 接线保留,切回改 'gltf' 即可):
-    // { variant: 'gltf', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
-    { variant: 't14', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
+    // 玩家 T-14 坦克。
+    // variant 'gltf' → GltfTank(外部 glb 美术资产,assets/t14.glb,精细模型);
+    // 切回程序化构建:variant 改 't14'(TankVisualBuilder.buildCustom,数据驱动)。
+    { variant: 'gltf', spawn: { x: 0, y: 0, z: -16 }, yaw: 0, player: true, team: 'player' },
     // 静态展示坦克(可破坏靶子,team:neutral=NPC 不主动攻击)
     { variant: 'tiger', spawn: { x: -16, y: 0, z: -60 }, yaw: 0, player: false, team: 'neutral' },
     { variant: 'abrams', spawn: { x: 16, y: 0, z: -60 }, yaw: 0, player: false, team: 'neutral' },
@@ -649,5 +649,72 @@ export const CONFIG = {
     radiusMin: 16, radiusMax: 32, // 山底半径范围(略放大,匹配更大的山环)
     heightMin: 20, heightMax: 40, // 山高范围(略放大,视觉更壮观)
     color: 0x4a4a3a, // 山体灰绿
+  },
+
+  /** 音频系统(机械音 + 人声语音)
+   * ------------------------------------------------------------
+   * 分三轨:
+   *  - sfx(机械音:开炮/引擎/行驶):所有坦克都发声,经 PannerNode 做 3D 距离衰减,
+   *    玩家能听声辨位、感知远近。引擎循环音仅近距离 NPC 播放(性能)。
+   *  - voice(人声指挥):仅玩家附身坦克触发,中文,非空间化直放——
+   *    避免远处 NPC 喊话混成一锅;玩家是单车指挥视角。
+   *  - bgm(背景音乐):加载/作战状态各一曲循环,非空间化,独立音量轨。
+   *
+   * AudioContext 解锁:浏览器要求用户手势。加载阶段 ctx 保持 suspended
+   * (decodeAudioData 不需 running),玩家点"开始作战"按钮时才 resume。
+   * 加载失败/ctx 不可用时降级静音,不阻塞游戏。 */
+  audio: {
+    /** 主音量(0~1,作用于 masterGain) */
+    master: 0.8,
+    /** 机械音轨音量(0~1) */
+    sfx: 0.9,
+    /** 人声音轨音量(0~1) */
+    voice: 1.0,
+    /** 背景音乐轨音量(0~1)。低于音效,避免盖过战斗反馈 */
+    bgm: 0.45,
+    /** 空间化距离衰减(机械音用;PannerNode 参数) */
+    spatial: {
+      /** 参考距离(m):此距离内音量不衰减 */
+      refDistance: 8,
+      /** 衰减系数(inverse 模型 rolloffFactor) */
+      rolloff: 1.2,
+      /** 最大距离(m):超此静音(上限,防远处声源堆积) */
+      maxDistance: 120,
+    },
+    /** 引擎循环音策略(双层:发动机 + 行驶,按速度分档切换)
+     * ------------------------------------------------------------
+     * 发动机层(engine):idle(静止/低速) ↔ full_speed(高速) —— 转速感
+     * 行驶层(driving):静止不响,low(低速) ↔ high(高速) —— 路面行驶感
+     * 两层独立按速度切档,叠加播放(更真实的"引擎+行驶"复合声)。 */
+    engine: {
+      /** NPC 引擎音播放半径(m):距玩家此距离内的存活 NPC 才播引擎循环音,
+       *  超出的不播(避免十几个 PannerNode 循环源堆积卡顿) */
+      npcPlayRadius: 50,
+      /** 静止阈值(m/s):速度低于此视为静止,行驶层(driving)全部静音
+       *  (停车无行驶声,仅发动机怠速)。发动机层仍响 idle。 */
+      minSpeed: 0.5,
+      /** 低速/高速分界(m/s):发动机与行驶层各自按此切档
+       *  速度≥此 → engine_full + driving_high;否则 engine_idle + driving_low */
+      speedThreshold: 1.5,
+      /** 档位切换交叉淡变时长(s):平滑切换不突兀 */
+      crossfade: 0.4,
+    },
+    /** 人声语音防刷屏冷却(s):同一条语音两次触发间的最小间隔 */
+    voiceCooldown: {
+      /** 发现敌人(玩家命中敌坦):冷却较长,避免连续命中刷屏 */
+      spotted: 5,
+      /** 低弹药警告:冷却较长,避免持续低弹药时反复播 */
+      lowAmmo: 20,
+    },
+    /** 低弹药语音触发:弹药总量占比低于阈值时播一次警告,
+     *  补满后重置(下次再低于阈值可再触发)。仅玩家触发。 */
+    lowAmmo: {
+      /** 触发阈值(0~1):(ap+he)/(maxAp+maxHe) 低于此比例 → 播 low_ammo */
+      ratio: 0.3,
+    },
+    /** 语音语言(决定加载哪套语音文件)。
+     *  'zh' 仅加载中文 | 'en' 仅英文(当前) | 'both' 双语都加载。
+     *  当前决策"仅玩家触发语音" → 加载一套即可。 */
+    voiceLang: 'en' as 'zh' | 'en' | 'both',
   },
 } as const;

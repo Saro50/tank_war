@@ -1,0 +1,77 @@
+{
+  "engine": "ChatTTS",
+  "source": "huggingface",
+  "global": {
+    "speaker_seed": 2,
+    "temperature": 0.2,
+    "oral": 2,
+    "laugh": 0,
+    "break": 4,
+    "speed": 5
+  },
+  "seeds_used": [
+    2
+  ],
+  "lines": [
+    {
+      "lang": "zh",
+      "text": "收到，目标已锁定，准备开火。",
+      "filename": "zh_01_target_locked.wav"
+    },
+    {
+      "lang": "zh",
+      "text": "弹药不足",
+      "filename": "zh_01_low_ammo.wav"
+    },
+    {
+      "lang": "zh",
+      "text": "明白，正在调整炮塔角度。",
+      "filename": "zh_02_adjusting_turret.wav"
+    },
+    {
+      "lang": "zh",
+      "text": "收到命令，全速前进！",
+      "filename": "zh_03_full_speed.wav"
+    },
+    {
+      "lang": "zh",
+      "text": "敌方坦克已摧毁",
+      "filename": "zh_04_spotted_enemy.wav"
+    },
+    {
+      "lang": "zh",
+      "text": "弹药装填完毕，等待指示。",
+      "filename": "zh_05_shell_loaded.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Roger that, target acquired, ready to fire.",
+      "filename": "en_01_target_locked.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Copy, adjusting turret angle.",
+      "filename": "en_02_adjusting_turret.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Affirmative, advancing at full speed.",
+      "filename": "en_03_full_speed.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Enemy tank.",
+      "filename": "en_04_spotted_enemy.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Out of ammo",
+      "filename": "en_05_low_ammo.wav"
+    },
+    {
+      "lang": "en",
+      "text": "Shell loaded, standing by for orders.",
+      "filename": "en_05_shell_loaded.wav"
+    }
+  ]
+}

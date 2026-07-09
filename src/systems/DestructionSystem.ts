@@ -12,6 +12,7 @@ import { ResupplyPoint } from '../entities/ResupplyPoint';
 import { StaticTankBase } from '../entities/tanks/StaticTankBase';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { TankPart } from '../entities/TankStatus';
+import type { SoundHooks } from '../audio/SoundSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Destruction');
@@ -124,11 +125,18 @@ export class DestructionSystem {
   private readonly tankBodySet = new Set<RAPIER.RigidBody>();
   /** 撞击冷却(秒)：连续碰撞不重复扣血，避免一帧多次 applyDamage */
   private ramCooldown = 0;
+  /** 音效钩子(可选:main 创建 SoundSystem 后注入。命中敌坦时触发语音04) */
+  private sound?: SoundHooks;
 
   constructor(physics: PhysicsWorld, render: RenderScene) {
     this.physics = physics;
     this.render = render;
     log.info('destruction system ready');
+  }
+
+  /** 注入音效钩子(命中敌坦时触发玩家语音04) */
+  setSoundHooks(s: SoundHooks): void {
+    this.sound = s;
   }
 
   /**
@@ -558,6 +566,8 @@ export class DestructionSystem {
       // 部位 debuff 注入(M2 核心:turret/track 命中注入对应 debuff 到 status)
       this.applyPartDebuff(tank, part);
       log.info('AP direct hit', { tank: tank.displayName, part, dmg: dmg.toFixed(1), hp: tank.getHp().toFixed(0) });
+      // 音效:命中敌坦(机械音爆炸 + 玩家语音04);excludeTank 是开火者(owner)
+      this.sound?.onTankHit(excludeTank, tank, pos);
       return;
     }
     // 非坦克部位 collider(AP 打到环境:建筑/树/地面):降级为小 AOE,对可破坏物按 AP 倍率
@@ -655,6 +665,9 @@ export class DestructionSystem {
       const frags = tank.takeHit(pos, dmg);
       this.fragments.push(...frags);
       tanksHit++;
+      // 音效:AOE 命中敌坦(机械音爆炸 + 玩家语音04);excludeTank 是开火者(owner)。
+      // AOE 可能一次命中多辆,每辆都触发 onTankHit;语音04 内部有冷却防刷屏。
+      this.sound?.onTankHit(excludeTank, tank, pos);
     }
 
     // 补给点(可被摧毁:HP 机制,按距离衰减扣血;摧毁后由 ResupplyPoint 自身状态机倒计时再生)

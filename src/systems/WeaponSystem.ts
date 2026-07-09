@@ -8,6 +8,7 @@ import { MuzzleFlash } from '../effects/MuzzleFlash';
 import type { CameraShake } from '../effects/CameraShake';
 import type { InputState } from './InputSystem';
 import type { DestructionSystem } from './DestructionSystem';
+import type { SoundHooks } from '../audio/SoundSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Weapon');
@@ -51,6 +52,11 @@ export class WeaponSystem {
   private prevFire = false;
   /** 每辆坦克独立的后坐量，避免切换坦克时串位 */
   private recoilByTank = new Map<number, number>();
+  /** 音效钩子(可选:main 创建 SoundSystem 后注入。未注入时静默,不影响游戏) */
+  private sound?: SoundHooks;
+  /** 低弹药边沿标志(按 tankId):true=已触发低弹药警告。
+   *  跌破阈值时 true 触发语音;补满后重置为 false,下次再跌破可再触发。 */
+  private readonly lowAmmoFlag = new Map<number, boolean>();
 
   // —— 弹药(M5 + 弹药种类增强:按弹种独立库存,按坦克隔离) ——
   /** 弹药上限(按弹种,所有坦克统一 CONFIG.ammo.maxByType) */
@@ -89,6 +95,29 @@ export class WeaponSystem {
     this.ammoByTank.delete(tankId);
     this.selectedByTank.delete(tankId);
     this.recoilByTank.delete(tankId);
+    this.lowAmmoFlag.delete(tankId); // 清低弹药标志,防 tankId 单调递增导致 Map 无限增长
+  }
+
+  /** 注入音效钩子(main 创建 SoundSystem 后调用)。未注入时音效静默,不影响武器逻辑 */
+  setSoundHooks(s: SoundHooks): void {
+    this.sound = s;
+  }
+
+  /**
+   * 低弹药边沿检测(开火扣弹/补给补弹后调用)。
+   * ------------------------------------------------------------
+   * 弹药总量占比 < CONFIG.audio.lowAmmo.ratio 且上一帧未触发 → 播 low_ammo 语音。
+   * 补满后(占比回升)重置标志,下次再跌破可再触发。
+   * 按 tankId 隔离(玩家 Tab 切换/多坦克不串位)。SoundSystem 内部 isPlayer 判定,
+   * 仅玩家实际发声;NPC 调用无效(静默)。
+   */
+  private checkLowAmmo(tank: IControllableTank, stock: AmmoStock): void {
+    const total = stock.ap + stock.he;
+    const max = this.maxByType.ap + this.maxByType.he;
+    const low = total / max < CONFIG.audio.lowAmmo.ratio;
+    const prev = this.lowAmmoFlag.get(tank.id) ?? false;
+    this.lowAmmoFlag.set(tank.id, low);
+    if (low && !prev) this.sound?.onLowAmmo(tank);
   }
 
   /** 取某坦克弹药库存(首次访问按满弹药初始化,惰性,避免构造时不知有哪些 tank) */
@@ -235,6 +264,13 @@ export class WeaponSystem {
     if (changed) {
       this.ammoByTank.set(tank.id, stock);
       this.resupplyFlash = 0.25;
+      // 音效:补满瞬间(changed && isAmmoFull 精确捕捉"刚补满的那一帧")
+      // 触发玩家语音05;本来满的不 changed 不会误触,半补过程没满也不触发
+      if (stock.ap >= this.maxByType.ap && stock.he >= this.maxByType.he) {
+        this.sound?.onAmmoFilled(tank);
+      }
+      // 低弹药边沿:补弹后占比回升 → 重置 flag(下次再跌破可再触发)
+      this.checkLowAmmo(tank, stock);
     }
   }
 
@@ -283,6 +319,8 @@ export class WeaponSystem {
     // 6. 弹药消耗(扣对应弹种,按坦克独立计)
     stock[type] -= 1;
     this.ammoByTank.set(tank.id, stock);
+    // 低弹药边沿检测(扣弹后可能跌破阈值 → 触发 low_ammo 语音)
+    this.checkLowAmmo(tank, stock);
 
     log.info('FIRE', {
       tank: tank.displayName,
@@ -291,6 +329,9 @@ export class WeaponSystem {
       muzzle: `${pos.x.toFixed(1)},${pos.y.toFixed(1)},${pos.z.toFixed(1)}`,
       impulse: J.toFixed(0),
     });
+
+    // 音效:开炮机械音(空间化,炮口位置) + 玩家语音01(玩家开火时)
+    this.sound?.onFire(tank, pos);
   }
 
   private updateRecoil(tank: IControllableTank): void {

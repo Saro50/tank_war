@@ -1,5 +1,6 @@
 import { CONFIG } from '../config';
 import type { IControllableTank } from '../entities/IControllableTank';
+import type { SoundHooks } from '../audio/SoundSystem';
 import { Logger } from '../utils/Logger';
 
 const log = Logger.create('Skill');
@@ -42,8 +43,15 @@ export class SkillSystem {
   private readonly statesByTank = new Map<number, Record<SkillId, SkillState>>();
   /** repair 已回血累计(中断日志/调试用) */
   private readonly repairHealedByTank = new Map<number, number>();
+  /** 音效钩子(可选:boost 激活时触发玩家语音03) */
+  private sound?: SoundHooks;
 
   constructor(private readonly getActiveTank: () => IControllableTank) {}
+
+  /** 注入音效钩子(boost 激活时触发玩家语音03) */
+  setSoundHooks(s: SoundHooks): void {
+    this.sound = s;
+  }
 
   /** 取某坦克技能状态(惰性初始化全冷却完毕) */
   private statesOf(tank: IControllableTank): Record<SkillId, SkillState> {
@@ -75,6 +83,8 @@ export class SkillSystem {
     if (id === 'boost') {
       const cfg = CONFIG.combat.skills.boost;
       tank.status.apply({ id: 'boost', remaining: cfg.duration, moveScale: cfg.moveScale, turnScale: cfg.turnScale });
+      // 音效:引擎过载激活 → 玩家语音03(全速前进)
+      this.sound?.onBoostActivate(tank);
     } else if (id === 'armor') {
       const cfg = CONFIG.combat.skills.armor;
       tank.status.apply({ id: 'armor', remaining: cfg.duration, damageReduction: cfg.damageReduction });

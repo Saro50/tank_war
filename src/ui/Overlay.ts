@@ -43,6 +43,12 @@ export class Overlay {
   private readonly resultTitle: HTMLDivElement;
   private readonly resultDetail: HTMLDivElement;
   private readonly bannerEl: HTMLDivElement;
+  /** 加载面板(loading 状态显示) */
+  private readonly loadingEl: HTMLDivElement;
+  /** 加载进度条填充(宽度随百分比变化) */
+  private readonly loadingBarFill: HTMLDivElement;
+  /** 加载当前阶段文字 */
+  private readonly loadingLabel: HTMLDivElement;
   /** 玩法说明元素(随关卡选择动态切换文案) */
   private readonly tipEl: HTMLDivElement;
   private lastPosture: Posture = 'normal';
@@ -65,11 +71,20 @@ export class Overlay {
       LEVEL_CARD_STYLE;
     container.appendChild(styleEl);
 
+    // —— 加载面板(初始即显示,资源就绪后 hideLoading 切到菜单) ——
+    this.loadingEl = document.createElement('div');
+    Object.assign(this.loadingEl.style, overlayBaseStyle);
+    this.loadingEl.innerHTML = this.buildLoadingHtml();
+    container.appendChild(this.loadingEl);
+    this.loadingLabel = this.loadingEl.querySelector<HTMLDivElement>('#tw-loading-label')!;
+    this.loadingBarFill = this.loadingEl.querySelector<HTMLDivElement>('#tw-loading-fill')!;
+
     // —— 开始界面(关卡选择) ——
     this.menuEl = document.createElement('div');
     Object.assign(this.menuEl.style, overlayBaseStyle);
     this.menuEl.innerHTML = this.buildMenuHtml();
     container.appendChild(this.menuEl);
+    this.menuEl.style.display = 'none'; // 初始隐藏:加载完成 showMenu 时才显示
     // 玩法说明元素引用(选中关卡时动态更新文案)
     this.tipEl = this.menuEl.querySelector<HTMLDivElement>('#tw-tip')!;
     this.tipEl.textContent = this.currentLevelTip();
@@ -168,6 +183,67 @@ export class Overlay {
       `</div></div>`,
       `<button id="tw-start" style="${btnStyleStr};font-size:18px;margin-top:6px">开始作战</button>`,
     ].join('');
+  }
+
+  // ============================================================
+  // 加载面板(loading 状态)
+  // ============================================================
+
+  /** 加载面板 HTML:标题 + 进度条 + 当前阶段文字。
+   *  风格沿用菜单暗色军事风,保持视觉一致。 */
+  private buildLoadingHtml(): string {
+    return [
+      `<div style="font-size:52px;font-weight:bold;letter-spacing:8px;color:#e6e6e6;margin-bottom:6px;text-shadow:0 2px 8px #000">坦克大战</div>`,
+      `<div style="font-size:14px;color:#9a9a9a;margin-bottom:34px">3D 装甲对抗 · 单人关卡</div>`,
+      // 进度条外框(暗色凹槽)
+      `<div style="width:360px;height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;margin-bottom:14px">`,
+      // 进度条填充(军绿,宽度由 updateProgress 动态设)
+      `<div id="tw-loading-fill" style="width:0%;height:100%;background:linear-gradient(90deg,#6a7545,#9aa860);border-radius:4px;transition:width .2s ease"></div>`,
+      `</div>`,
+      // 当前阶段文字 + 百分比
+      `<div id="tw-loading-label" style="font-size:13px;color:#9a9a9a;min-height:18px">正在初始化…</div>`,
+    ].join('');
+  }
+
+  /** 显示加载面板(构造时已显示,此方法供重试用) */
+  showLoading(): void {
+    this.loadingEl.style.display = 'flex';
+  }
+
+  /** 更新加载进度(done/total 算百分比,label 显示当前阶段) */
+  updateProgress(p: { done: number; total: number; label: string }): void {
+    const pct = p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+    this.loadingBarFill.style.width = `${pct}%`;
+    this.loadingLabel.textContent = `${p.label} ${pct}%`;
+  }
+
+  /** 隐藏加载面板(资源就绪切到菜单时调用) */
+  hideLoading(): void {
+    this.loadingEl.style.display = 'none';
+  }
+
+  /**
+   * 加载失败面板:显示错误信息 + 重试按钮。
+   * ------------------------------------------------------------
+   * 硬依赖(物理/数据)加载失败时,隐藏进度条显示错误,提供重试(刷新页面)。
+   */
+  showLoadError(message: string, onRetry: () => void): void {
+    // 隐藏进度相关,改为错误提示
+    const bar = this.loadingEl.querySelector<HTMLDivElement>('#tw-loading-fill')?.parentElement;
+    if (bar) bar.style.display = 'none';
+    this.loadingLabel.style.color = '#ff5252';
+    this.loadingLabel.textContent = message;
+    // 重试按钮(只加一次)
+    if (!this.loadingEl.querySelector('#tw-retry')) {
+      const btn = document.createElement('button');
+      btn.id = 'tw-retry';
+      Object.assign(btn.style, btnStyle);
+      btn.style.fontSize = '16px';
+      btn.style.marginTop = '20px';
+      btn.textContent = '重试';
+      btn.addEventListener('click', onRetry);
+      this.loadingEl.appendChild(btn);
+    }
   }
 
   showMenu(): void {

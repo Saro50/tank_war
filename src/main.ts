@@ -1,9 +1,13 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { BoxGeometry, ConeGeometry, Mesh, MeshStandardMaterial } from 'three';
+import { BoxGeometry, ConeGeometry, Mesh, MeshStandardMaterial, Vector3 } from 'three';
 import { CONFIG, type NpcTier } from './config';
 import { PhysicsWorld } from './core/PhysicsWorld';
 import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
+import { loadAssets } from './core/AssetLoader';
+import { AudioEngine } from './audio/AudioEngine';
+import { AudioAssets } from './audio/AudioAssets';
+import { SoundSystem } from './audio/SoundSystem';
 import { createTank } from './entities/tanks/registry';
 import { StaticTankBase } from './entities/tanks/StaticTankBase';
 import type { IControllableTank } from './entities/IControllableTank';
@@ -26,8 +30,6 @@ import { TuningPanel } from './ui/TuningPanel';
 import { HUD } from './ui/HUD';
 import { Logger } from './utils/Logger';
 import { initDebugFlag, isDebug } from './utils/debug';
-import { TankDataStore } from './data/TankDataStore';
-// import { GltfTankAsset } from './entities/GltfTankAsset'; // gltf 实验暂搁置(config 玩家坦克已切回 t14)
 
 const log = Logger.create('main');
 
@@ -48,10 +50,14 @@ async function main(): Promise<void> {
   const container = document.getElementById('app');
   if (!container) throw new Error('mount container #app not found');
 
-  // destruction/tank 在下方创建,但调试回调需引用它们;
+  // destruction/tank/director/capture/render 在下方创建,但 overlay 的 onStart 回调需引用它们;
   // 用 let 占位 + 闭包捕获,按钮点击时(模块均已建好)才读取。
   let destructionRef: DestructionSystem | undefined;
   let switcherRef: TankSwitcher | undefined;
+  let directorRef: DirectorSystem | undefined;
+  let captureRef: CaptureSystem | undefined;
+  // render 用确定赋值断言:onStart 闭包(定义早于赋值)需引用,但点击时已赋值,运行时安全
+  let render!: RenderScene;
 
   // 调参面板仅调试模式创建:slider 调手感 + 模拟受击/切换坦克按钮均属调试功能。
   // 非调试时整体不创建 → 用 config 默认值、无面板、无调试按钮。
@@ -77,23 +83,64 @@ async function main(): Promise<void> {
       })
     : undefined;
 
-  const physics = await PhysicsWorld.create();
-  // 视觉数据加载(JSON + schema 校验 + 内置兜底)。
-  // 必须在 buildTanks 前:B 阶段起 TankVisualBuilder 从此取数据渲染,
-  // 数据未就绪则构建会抛错。当前 buildVisuals 仍读 CONFIG(过渡期,零回归)。
-  await TankDataStore.load();
+  // 游戏状态机(loading→menu→playing→won/lost)+ objective 延后创建。
+  // overlay 提前创建:立即显示加载界面,资源就绪后切到菜单。
+  // objective 由 onStart 回调按 level 配置创建(选关后才有实例)。
+  let objective: Objective | undefined;
+  const game = { state: 'loading' as GameState, startTime: 0 };
 
-  // glb 美术资产预加载(实验暂搁置:config 玩家坦克已切回 t14)。
-  // 切回 gltf 实验:config.ts variant 改 'gltf' + 取消下行注释(注意路径已修正 assets)。
-  // const hasGltfVariant = (CONFIG.tanks as Array<{variant:string}>).some((t) => t.variant === 'gltf');
-  // if (hasGltfVariant) {
-  //   try {
-  //     await GltfTankAsset.load(`${import.meta.env.BASE_URL}assets/game_ready_tank.glb`);
-  //   } catch (e) {
-  //     log.error('glb asset load failed, GltfTank will error on build', { err: String(e) });
-  //   }
-  // }
-  const render = new RenderScene(container);
+  // 音频引擎 + 资源仓库:ctx 在此创建(suspended 态),decodeAudioData 不需 running 即可解码。
+  // bindAssets 让引擎播放时能取到已解码 buffer。
+  const audioEngine = new AudioEngine();
+  const audioAssets = new AudioAssets();
+  audioEngine.bindAssets(audioAssets);
+
+  // overlay:加载界面(构造即显示)→ 菜单 → 结算。onStart/onRestart 用闭包读上方 let 占位。
+  // 开始按钮点击 = 用户手势 → audioEngine.unlock() resume ctx(浏览器自动播放策略)。
+  const overlay = new Overlay(
+    container,
+    (levelId: string): void => {
+      // 用户手势:解锁音频(加载阶段 ctx 处于 suspended,此刻 resume)
+      void audioEngine.unlock();
+      // 选关启动:按 level 配置创建对应 Objective(读 director/capture 进度判定胜负)
+      const director = directorRef!;
+      const capture = captureRef!;
+      const level: LevelConfig = CONFIG.levels.find((l) => l.id === levelId) ?? CONFIG.levels[0];
+      objective = createObjective(level, {
+        getKillCount: () => director.killCount,
+        capture,
+      });
+      // 占领军专属:创建据点 + 激活占领系统 + 令现存 NPC 围绕据点巡逻(形成对抗)
+      if (level.id === 'capture') {
+        const cfg = CONFIG.capturePoint;
+        const zone = new CaptureZone(render, cfg.position);
+        // level 此处已收窄为 capture 关卡类型,enemyTarget 字段存在;歼灭战分支不进此块
+        capture.setZone(zone, level.target, level.enemyTarget);
+        director.setCaptureTarget(cfg.position, cfg.npcPatrolRadius);
+        log.info('capture level setup', { at: `${cfg.position.x},${cfg.position.z}` });
+      }
+      game.state = 'playing';
+      game.startTime = performance.now();
+      log.info('game start', { level: level.id, objective: objective.description });
+    },
+    () => location.reload(),
+  );
+
+  // 统一资源加载(物理引擎 + 坦克数据 + 音效并行,进度回调更新加载界面)。
+  // 硬依赖(physics/data)失败 → 显示加载失败面板 + 重试;音效失败降级静音不阻塞。
+  let physics: PhysicsWorld;
+  try {
+    const result = await loadAssets(audioEngine.ctx, audioAssets, (p) => overlay.updateProgress(p));
+    physics = result.physics;
+  } catch (e) {
+    log.error('asset load failed', e);
+    overlay.showLoadError('资源加载失败,请重试', () => location.reload());
+    return; // 加载失败:不继续构建场景
+  }
+
+  // glb 玩家坦克模型加载已由 AssetLoader 统一接管(config.tanks 含 variant:'gltf'
+  // 时自动加载 assets/t14.glb),此处不再单独预加载。
+  render = new RenderScene(container);
   const hud = new HUD(container);
 
   buildGround(physics, render);
@@ -122,12 +169,14 @@ async function main(): Promise<void> {
   // 占领系统(始终创建:歼灭战无 zone 时空转;占领军选关后 setZone 激活)。
   // 传给 director:NPC 创建/摧毁时注册/注销,纳入占领判定。
   const capture = new CaptureSystem();
+  captureRef = capture; // 供 overlay.onStart 闭包读取
   // 玩家用 getter:Tab 切换附身坦克后,占领判定跟随新的 activeTank
   capture.registerPlayer(() => switcher.activeTank);
 
   // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。传入 resupply:NPC 弹药机制
   // + capture:NPC 纳入占领判定(创建/摧毁时注册/注销)。未来 LLM 接入点
   const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply, capture);
+  directorRef = director; // 供 overlay.onStart 闭包读取
 
   // 调试控制台:暴露 tw.spawnEnemy/tw.revive/tw.hp 到浏览器 DevTools Console,便于调试 NPC 难度/玩家状态
   new DebugConsole(director, () => switcher.activeTank);
@@ -159,47 +208,33 @@ async function main(): Promise<void> {
     tuningPanel?.setTankName(newTank.displayName);
   };
 
-  // 游戏状态机(menu→playing→won/lost)+ 覆盖层(关卡选择/结算/姿态横幅)。
-  // objective 延后创建:玩家在开始界面选关后,由 onStart 回调按 level 配置创建
-  // (歼灭战→KillObjective / 占领军→CaptureObjective + CaptureZone)。
-  let objective: Objective | undefined;
-  const game = { state: 'menu' as GameState, startTime: 0 };
-  const overlay = new Overlay(
-    container,
-    (levelId: string): void => {
-      // 选关启动:按 level 配置创建对应 Objective(读 director/capture 进度判定胜负)
-      const level: LevelConfig = CONFIG.levels.find((l) => l.id === levelId) ?? CONFIG.levels[0];
-      objective = createObjective(level, {
-        getKillCount: () => director.killCount,
-        capture,
-      });
-      // 占领军专属:创建据点 + 激活占领系统 + 令现存 NPC 围绕据点巡逻(形成对抗)
-      if (level.id === 'capture') {
-        const cfg = CONFIG.capturePoint;
-        const zone = new CaptureZone(render, cfg.position);
-        // level 此处已收窄为 capture 关卡类型,enemyTarget 字段存在;歼灭战分支不进此块
-        capture.setZone(zone, level.target, level.enemyTarget);
-        director.setCaptureTarget(cfg.position, cfg.npcPatrolRadius);
-        log.info('capture level setup', { at: `${cfg.position.x},${cfg.position.z}` });
-      }
-      game.state = 'playing';
-      game.startTime = performance.now();
-      log.info('game start', { level: level.id, objective: objective.description });
-    },
-    () => location.reload(),
-  );
+  // 音效系统(游戏层):实现 SoundHooks,管理引擎循环音 + 监听器。
+  // getPlayer 跟随 Tab 切换(语音仅玩家触发);allTanks 共享引用(director spawn 自动包含)。
+  // 创建后注入各系统:事件发生时回调,音效逻辑集中在 SoundSystem,系统间解耦。
+  const sound = new SoundSystem(audioEngine, () => switcher.activeTank, controllableTanks);
+  weapon.setSoundHooks(sound);
+  skill.setSoundHooks(sound);
+  destruction.setSoundHooks(sound);
+  // 注入到导演系统:NPC weapon 补注入,使 NPC 开火也有机械音(语音 isPlayer 过滤不播)
+  director.setSoundHooks(sound);
+
+  // 资源就绪:隐藏加载界面,进入开始菜单(menu 状态)。
+  // audioEngine 仍 suspended,玩家点"开始作战"按钮(onStart)时才 unlock。
+  overlay.hideLoading();
+  game.state = 'menu';
   overlay.showMenu();
 
   // objective 用 getter 传入:startLoop 启动时 objective 尚未创建(选关前),
   // 用闭包读 main 的 objective 变量最新值(选关回调赋值后 loop 即可见)
   const loop = startLoop(
     physics, render, input, switcher, controller, weapon, skill, shake, destruction,
-    hud, director, resupply, capture, () => objective, overlay, game,
+    hud, director, resupply, capture, () => objective, overlay, game, sound,
   );
 
   // 注册清理回调：HMR/页面卸载时停止循环、解绑输入、释放资源，防止内存泄漏与重复监听
   const cleanup = (): void => {
     loop.stop();
+    sound.dispose();
     tuningPanel?.dispose();
     for (const tank of controllableTanks) tank.dispose();
     render.dispose();
@@ -405,8 +440,8 @@ function buildMountains(physics: PhysicsWorld, render: RenderScene): void {
   log.info('mountains built', { count: cfg.count });
 }
 
-/** 游戏状态机:menu(开始界面) → playing(作战) → won/lost(结算)。未来可加 paused/多关流转 */
-type GameState = 'menu' | 'playing' | 'won' | 'lost';
+/** 游戏状态机:loading(资源加载) → menu(开始界面) → playing(作战) → won/lost(结算)。未来可加 paused/多关流转 */
+type GameState = 'loading' | 'menu' | 'playing' | 'won' | 'lost';
 
 /** 用时格式化 m:ss(从 startTime 到现在) */
 function elapsedText(startTime: number): string {
@@ -436,6 +471,8 @@ function startLoop(
   getObjective: () => Objective | undefined,
   overlay: Overlay,
   game: { state: GameState; startTime: number },
+  /** 音效系统:每帧更新监听器 + 引擎循环音(menu/结算时也更新,保持空间化正确) */
+  sound: SoundSystem,
 ): { stop: () => void } {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
@@ -446,6 +483,10 @@ function startLoop(
   let prevSwitchNext = false;
   let rafId = 0;
   let running = true;
+  /** 上一帧游戏状态(BGM 切换检测:状态变化时切背景音乐) */
+  let prevBgmState: GameState = game.state;
+  // 音效用复用向量(避免每帧 new):相机朝向 getWorldDirection 写入此对象
+  const camForward = new Vector3();
 
   const loop = (): void => {
     if (!running) return;
@@ -456,6 +497,14 @@ function startLoop(
 
     const inputState = input.state;
     const playing = game.state === 'playing';
+
+    // BGM 状态驱动:game.state 变化时切换背景音乐(SoundSystem 内部按 ctx 解锁态决定是否播放)
+    if (game.state !== prevBgmState) {
+      prevBgmState = game.state;
+      if (game.state === 'playing') sound.setBgmState('battle');
+      else if (game.state === 'menu' || game.state === 'loading') sound.setBgmState('loading');
+      else sound.setBgmState('none'); // won/lost:结算界面停 BGM
+    }
 
     // Tab 切换仅在调试模式 + playing 时生效(menu/结算不切)
     if (playing && isDebug() && inputState.switchNext && !prevSwitchNext) {
@@ -526,6 +575,10 @@ function startLoop(
       capture.update(frameTime); // 占领进度推进(占领军);歼灭战空转
     }
     controller.updateCamera(); // 始终:menu/结算时相机也看战场背景
+
+    // 音效更新(始终:menu/结算时也推进冷却 + 引擎音 + 监听器跟随相机)。
+    // 监听器位姿取玩家相机:position/朝向(getWorldDirection,-z 前)/up(默认 +y)。
+    sound.update(frameTime, render.camera.position, render.camera.getWorldDirection(camForward), render.camera.up);
 
     // 胜负检测(仅 playing):目标达成→won,玩家死/敌方占满→lost
     if (playing) {
