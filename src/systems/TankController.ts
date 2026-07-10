@@ -219,36 +219,31 @@ export class TankController {
     this.camera.lookAt(camLook);
   }
 
+  /**
+   * 【等距俯视预览·feature/isometric-camera-preview】
+   * ------------------------------------------------------------
+   * 固定斜 45° 方向跟随主坦克,不随炮塔/车身旋转 —— 仅验证俯视观感,
+   * 操控/射击/物理/破坏等一切逻辑保持原样。
+   *
+   * 几何:
+   *  - 方向固定:从坦克 +X/+Z 斜上方看向坦克,坦克转向时画面朝向不变(俯视策略感)。
+   *  - 俯角 45°:camHeight == camDist(水平总距离) → 等腰直角 → atan(1)=45°。
+   *  - 等距对称:dx == dz,使坦克 X/Z 轴在屏幕上呈对称斜线(经典等距感)。
+   * lerp 平滑跟随沿用 driveConfig.camera.lerp(保留跟车手感,验证后可调)。
+   */
   private computeCamera(out: Vector3): void {
-    const cfg = this.tank.driveConfig.camera;
-    const yaw = this.turretWorldYaw; // 视角基准=炮塔世界偏航(非车身 yaw)
-    const cos = Math.cos(yaw);
-    const sin = Math.sin(yaw);
     const t = this.tank.body.translation();
-    const off = cfg.offset;
-    const look = cfg.lookOffset;
-
-    out.set(
-      t.x + off.x * cos + off.z * sin,
-      t.y + off.y,
-      t.z - off.x * sin + off.z * cos,
-    );
-    camLook.set(
-      t.x + look.x * cos + look.z * sin,
-      t.y + look.y,
-      t.z - look.x * sin + look.z * cos,
-    );
+    const camHeight = 22; // 相机离地高度(m)
+    const camDist = 22; // 水平总距离(m,= camHeight → 俯角 45°)
+    const d = camDist * 0.7071; // 各轴分量(dx=dz → 等距对称)
+    out.set(t.x + d, t.y + camHeight, t.z + d);
+    camLook.set(t.x, t.y + 1, t.z); // 看坦克腰部(略抬离地面,坦克居中显示)
   }
 
   /** 车身当前偏航角（从刚体四元数计算） */
   private get bodyYaw(): number {
     const q = this.tank.body.rotation();
     return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
-  }
-
-  /** 炮塔世界偏航(rad)= 车身 yaw + 炮塔相对旋转角。相机视角跟随此值。 */
-  private get turretWorldYaw(): number {
-    return this.bodyYaw + this.tank.turret.rotation.y;
   }
 
   /** 诊断用：当前炮塔角/炮管俯仰(度) */

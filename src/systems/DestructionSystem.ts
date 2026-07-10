@@ -568,6 +568,11 @@ export class DestructionSystem {
       log.info('AP direct hit', { tank: tank.displayName, part, dmg: dmg.toFixed(1), hp: tank.getHp().toFixed(0) });
       // 音效:命中敌坦(机械音爆炸 + 玩家语音04);excludeTank 是开火者(owner)
       this.sound?.onTankHit(excludeTank, tank, pos);
+      // 击毁:HP 归零 state→destroyed,播击毁音 + 即时停引擎。
+      // takeHit 副作用会改 tank.state,但 TS 控制流据 line 559 过滤把它收窄为 'intact',
+      // 不知 takeHit 副作用 → 须用 as 断言为 union 绕过收窄(类型注解无效,只有断言改变表达式类型)。
+      const stateAfter = tank.state as IControllableTank['state'];
+      if (stateAfter === 'destroyed') this.sound?.onTankDestroyed(tank, pos);
       return;
     }
     // 非坦克部位 collider(AP 打到环境:建筑/树/地面):降级为小 AOE,对可破坏物按 AP 倍率
@@ -668,6 +673,11 @@ export class DestructionSystem {
       // 音效:AOE 命中敌坦(机械音爆炸 + 玩家语音04);excludeTank 是开火者(owner)。
       // AOE 可能一次命中多辆,每辆都触发 onTankHit;语音04 内部有冷却防刷屏。
       this.sound?.onTankHit(excludeTank, tank, pos);
+      // 击毁:HP 归零 state→destroyed,播击毁音 + 即时停引擎。
+      // takeHit 副作用会改 tank.state,但 TS 控制流据 line 653 过滤把它收窄为 'intact',
+      // 不知 takeHit 副作用 → 须用 as 断言为 union 绕过收窄。AOE 一发多杀时每辆击毁都响。
+      const stateAfter = tank.state as IControllableTank['state'];
+      if (stateAfter === 'destroyed') this.sound?.onTankDestroyed(tank, pos);
     }
 
     // 补给点(可被摧毁:HP 机制,按距离衰减扣血;摧毁后由 ResupplyPoint 自身状态机倒计时再生)

@@ -21,6 +21,7 @@ export type SoundId =
   | 'engine_full' // 发动机全速(高速)
   | 'driving_low' // 行驶低速
   | 'driving_high' // 行驶高速
+  | 'tank_destroy' // 坦克被击毁(大爆炸)
   // —— 人声语音(按 voiceLang 加载对应文件) ——
   | 'voice_full_speed'
   | 'voice_spotted_enemy'
@@ -48,6 +49,7 @@ const FIXED_PATHS: Partial<Record<SoundId, string>> = {
   engine_full: 'sounds/tank/tank_engine_full_speed_loop.wav',
   driving_low: 'sounds/tank/tank_driving_low_speed_loop.wav',
   driving_high: 'sounds/tank/tank_driving_high_speed_loop.wav',
+  tank_destroy: 'sounds/tank/tank_destory.wav', // 文件名沿用美术命名(destory)
   bgm_loading: 'sounds/bgm/loading_bgn.wav',
   bgm_in_game: 'sounds/bgm/in_game.wav',
 };

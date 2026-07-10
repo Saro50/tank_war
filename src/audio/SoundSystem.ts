@@ -28,6 +28,8 @@ export interface SoundHooks {
   onAmmoFilled(tank: IControllableTank): void;
   /** 弹药总量跌破阈值:玩家语音(低弹药警告,WeaponSystem 边沿触发) */
   onLowAmmo(tank: IControllableTank): void;
+  /** 坦克被击毁:击毁爆炸音(空间化,位置=坦克本体) + 即时停该坦克引擎循环音 */
+  onTankDestroyed(victim: IControllableTank, pos: Vec3): void;
 }
 
 /** 引擎速度档(决定 4 个循环源的音量组合) */
@@ -203,11 +205,11 @@ export class SoundSystem implements SoundHooks {
    * 每帧更新:推进冷却 + 更新监听器 + 引擎循环音 + BGM 刷新。
    * ------------------------------------------------------------
    * @param dt             帧时间
-   * @param listenerPos    监听器(玩家相机)位置
-   * @param listenerForward 监听器朝向(three 约定 -z 前)
+   * @param listenerForward 监听器朝向(three 约定 -z 前,取相机朝向=屏幕左右对应声道)
    * @param listenerUp     监听器上方向(+y)
+   * @param playing        游戏是否在进行(playing 态);非 playing 时停所有引擎循环音
    */
-  update(dt: number, listenerPos: Vec3, listenerForward: Vec3, listenerUp: Vec3): void {
+  update(dt: number, listenerForward: Vec3, listenerUp: Vec3, playing: boolean): void {
     if (!this.engine.available) return;
 
     // 1. 推进语音冷却
@@ -220,10 +222,21 @@ export class SoundSystem implements SoundHooks {
     }
 
     // 2. 更新监听器位姿(空间化音效定位基准)
-    this.engine.setListener(listenerPos, listenerForward, listenerUp);
+    //    ------------------------------------------------------------
+    //    俯视等距视角下监听器跟随【玩家坦克】而非高高在上的相机:
+    //    相机在 22m 高空,炮口到相机 ~29m,会触发 PannerNode inverse 衰减
+    //    把玩家自身开炮音压到原来的 ~38%(耳朵离声源太远)。俯视策略游戏的
+    //    听觉语义是"声源相对玩家坦克的远近/方向",耳朵应在坦克上:
+    //      - 玩家自身开炮(炮口距坦克中心 ~2.5m < refDistance 8)→ 几乎不衰减,响亮;
+    //      - NPC 开炮按"NPC→玩家坦克"距离衰减 → 近处威胁响、远处交火轻,符合预期。
+    //    朝向仍用相机基准:屏幕左右 = 声道左右(玩家看屏幕判断方位)。
+    //    引擎音播放半径中心=玩家坦克(与监听器一致),见 updateEngineLoops。
+    const player = this.getPlayer();
+    const pt = player.body.translation();
+    this.engine.setListener({ x: pt.x, y: pt.y, z: pt.z }, listenerForward, listenerUp);
 
-    // 3. 引擎循环音管理(4 源:发动机 + 行驶)
-    this.updateEngineLoops(listenerPos);
+    // 3. 引擎循环音管理(4 源:发动机 + 行驶);非 playing 时清空(结算/菜单静音)
+    this.updateEngineLoops(playing);
 
     // 4. BGM 刷新(ctx 解锁后按 bgmState 播放)
     this.refreshBgm();
@@ -238,8 +251,24 @@ export class SoundSystem implements SoundHooks {
    *  3. 对已存在的:更新 PannerNode 位置 + 档位变化时交叉淡变 4 源音量;
    *  4. 对离开的(死了/远了):stop 淡出移除。
    */
-  private updateEngineLoops(listenerPos: Vec3): void {
+  private updateEngineLoops(playing: boolean): void {
     const cfg = CONFIG.audio.engine;
+    // 非 playing(菜单/won/lost):清空所有引擎循环音,保持安静。
+    // 玩家被毁→lost、胜利→won 后结算界面不再有引擎轰鸣干扰;菜单也不该有引擎声(仅 BGM)。
+    // 统一在入口门控,覆盖玩家+NPC 全部引擎音(onTankDestroyed 在击毁瞬间清单辆,此处清全部)。
+    if (!playing) {
+      if (this.engineLoops.size > 0) {
+        const f = cfg.crossfade;
+        for (const [, loop] of this.engineLoops) {
+          loop.engineIdle.stop(f);
+          loop.engineFull.stop(f);
+          loop.drivingLow.stop(f);
+          loop.drivingHigh.stop(f);
+        }
+        this.engineLoops.clear();
+      }
+      return;
+    }
     const radius = cfg.npcPlayRadius;
     const r2 = radius * radius;
 
@@ -257,12 +286,15 @@ export class SoundSystem implements SoundHooks {
     const wanted = new Set<number>();
     const player = this.getPlayer();
     if (player.state === 'intact') wanted.add(player.id);
+    // 半径中心=玩家坦克位置(与监听器一致)。曾用相机位置致投影点偏离玩家 ~22m,
+    // 播放范围椭圆变形(部分该播的没播/不该播的播了)。监听器在哪,能听到的范围就以哪为圆心。
+    const pp = player.body.translation();
     for (const t of this.allTanks) {
       if (t === player) continue; // 玩家已加
       if (t.state !== 'intact') continue; // 残骸不播引擎音
       const p = t.body.translation();
-      const dx = p.x - listenerPos.x;
-      const dz = p.z - listenerPos.z;
+      const dx = p.x - pp.x;
+      const dz = p.z - pp.z;
       if (dx * dx + dz * dz <= r2) wanted.add(t.id);
     }
 
@@ -327,20 +359,29 @@ export class SoundSystem implements SoundHooks {
   }
 
   /**
-   * 坦克被销毁时清理其引擎音(由 main/director 在 NPC 死亡时调用)。
-   * 注:updateEngineLoops 已能自动清理(wanted 不含死者),此方法用于即时停止
-   * 避免死亡到下一帧之间的短暂引擎音。
+   * 坦克被击毁:播放击毁爆炸音 + 即时清理该坦克引擎循环音。
+   * ------------------------------------------------------------
+   * 由 DestructionSystem 在坦克 HP 归零(state intact→destroyed)时调用,
+   * 传击毁位置(坦克本体)用于空间化。一次调用完成两件事:
+   *  1. 播 tank_destroy 击毁音(sfx 空间化,音量突出此关键事件);
+   *  2. 即时停该坦克引擎循环音(不等 updateEngineLoops 下一帧,避免死亡瞬间残响)。
+   * 注:updateEngineLoops 的 playing 门控也会在结算时清全部引擎音,
+   *     此方法保证"击毁那一帧"就静音引擎 + 响起击毁音。
    */
-  onTankDestroyed(tank: IControllableTank): void {
-    const loop = this.engineLoops.get(tank.id);
+  onTankDestroyed(victim: IControllableTank, pos: Vec3): void {
+    // 击毁音:空间化在坦克本体,音量 1.8 突出"坦克爆炸"这一关键事件
+    this.engine.playOnce('tank_destroy', 'sfx', pos, 1.8);
+    // 即时清理该坦克引擎循环音(防死亡瞬间引擎残响叠在击毁音上)
+    const loop = this.engineLoops.get(victim.id);
     if (loop) {
       const f = CONFIG.audio.engine.crossfade;
       loop.engineIdle.stop(f);
       loop.engineFull.stop(f);
       loop.drivingLow.stop(f);
       loop.drivingHigh.stop(f);
-      this.engineLoops.delete(tank.id);
+      this.engineLoops.delete(victim.id);
     }
+    log.info('TANK DESTROYED', { tank: victim.displayName });
   }
 
   /** 场景重置/卸载时清理所有循环音 + BGM(HMR/重开用) */

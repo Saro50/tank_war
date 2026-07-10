@@ -578,7 +578,7 @@ function startLoop(
 
     // 音效更新(始终:menu/结算时也推进冷却 + 引擎音 + 监听器跟随相机)。
     // 监听器位姿取玩家相机:position/朝向(getWorldDirection,-z 前)/up(默认 +y)。
-    sound.update(frameTime, render.camera.position, render.camera.getWorldDirection(camForward), render.camera.up);
+    sound.update(frameTime, render.camera.getWorldDirection(camForward), render.camera.up, playing);
 
     // 胜负检测(仅 playing):目标达成→won,玩家死/敌方占满→lost
     if (playing) {
