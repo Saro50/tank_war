@@ -40,12 +40,25 @@ const FALLBACK: Record<TankVariant, unknown> = {
 /** 数据缓存(load 完成后填充;初始空对象断言,get 前必须先 load) */
 let cache = {} as Record<TankVariant, TankData>;
 let loaded = false;
+/** 防竞态:load 并发调用时复用同一 Promise(避免两次各自跑一遍 loadOne) */
+let loadingPromise: Promise<void> | undefined;
 
-/** fetch 单个车型 JSON(失败抛错,由调用方捕获回退) */
+/** fetch 单个车型 JSON(失败抛错,由调用方捕获回退)。10s 超时防网络挂起卡死加载 */
 async function fetchJson(variant: TankVariant): Promise<unknown> {
-  const resp = await fetch(JSON_PATHS[variant]);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
-  return resp.json();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const resp = await fetch(JSON_PATHS[variant], { signal: ctrl.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    // 检测 Vite SPA fallback:不存在的文件返回 index.html(content-type: text/html)
+    const ct = resp.headers.get('content-type') ?? '';
+    if (!ct.includes('application/json')) {
+      throw new Error(`not JSON (got ${ct}), file likely missing — SPA fallback returned HTML`);
+    }
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -68,7 +81,9 @@ async function loadOne(variant: TankVariant): Promise<TankData> {
       issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
     });
   } catch (e) {
-    log.error('tank fetch failed, fallback to built-in', { variant, err: String(e) });
+    // JSON 文件不存在(SPA fallback 返回 HTML)是预期情况:
+    // 内置基准数据是安全网,用 info 降级避免控制台刷屏 error
+    log.info('tank json not available, using built-in data', { variant, reason: String(e) });
   }
   // 2. 回退内置基准 + 校验(基准理论上一定合法,因为随源码同步维护)
   const fallbackParsed = schema.safeParse(FALLBACK[variant]);
@@ -94,12 +109,17 @@ export const TankDataStore = {
       log.warn('load called twice, ignored');
       return;
     }
-    const entries = await Promise.all(
-      TANK_VARIANTS.map(async (v): Promise<[TankVariant, TankData]> => [v, await loadOne(v)]),
-    );
-    cache = Object.fromEntries(entries) as Record<TankVariant, TankData>;
-    loaded = true;
-    log.info('all tank data loaded', { variants: [...TANK_VARIANTS] });
+    // 防竞态:并发调用时复用同一 Promise(避免两次各自跑一遍 loadOne + 写 cache)
+    if (loadingPromise) return loadingPromise;
+    loadingPromise = (async (): Promise<void> => {
+      const entries = await Promise.all(
+        TANK_VARIANTS.map(async (v): Promise<[TankVariant, TankData]> => [v, await loadOne(v)]),
+      );
+      cache = Object.fromEntries(entries) as Record<TankVariant, TankData>;
+      loaded = true;
+      log.info('all tank data loaded', { variants: [...TANK_VARIANTS] });
+    })();
+    return loadingPromise;
   },
 
   /** 同步获取(load 完成后调用)。未 load 完成抛错(防御:避免读到空数据) */

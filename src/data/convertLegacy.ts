@@ -1126,8 +1126,7 @@ export function convertT14FromConfig(): TankModel {
     // T14 玩家坦克:碰撞体=CONFIG.tank.bodyHalf;冒烟={0,1.2,0};有脱战回血;驾驶=CONFIG.tank 提取
     bodyHalf: { x: t.bodyHalf.x, y: t.bodyHalf.y, z: t.bodyHalf.z },
     smokeOffset: { x: 0, y: 1.2, z: 0 },
-    regenDelay: t.damage.regenDelay,
-    regenRate: t.damage.regenRate,
+    // 回血已移至补给点,不再需要脱战回血配置
     drive: extractDriveFromTankConfig(),
   });
 }

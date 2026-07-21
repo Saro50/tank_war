@@ -5,6 +5,6 @@ dist-ssr
 .DS_Store
 .vscode/*
 !.vscode/extensions.json
-
+.env.production
 # 编辑器产物区(后台写入,不入库;开发者手动采纳到 public/tanks/)
 editor-dist/

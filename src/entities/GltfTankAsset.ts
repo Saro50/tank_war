@@ -72,6 +72,27 @@ export const GltfTankAsset = {
       log.warn('load called twice, ignored', { url });
       return;
     }
+    // 切换 URL 时释放旧缓存资源(防泄漏:已有 GltfTank 实例 clone 自旧 scene,
+    // 其共享 geometry/texture 引用变为孤儿——但实例自身 dispose 不释放共享资源,此处统一释放)
+    if (cachedScene) {
+      cachedScene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.geometry?.dispose();
+        const m = mesh.material;
+        if (Array.isArray(m)) m.forEach((mm) => {
+          const tex = (mm as { map?: THREE.Texture }).map;
+          tex?.dispose();
+          mm.dispose();
+        });
+        else if (m) {
+          const tex = (m as { map?: THREE.Texture }).map;
+          tex?.dispose();
+          m.dispose();
+        }
+      });
+      log.info('old glb cache disposed', { url: cachedUrl });
+    }
     log.info('loading glb asset', { url });
     const t0 = performance.now();
     const gltf = await new Promise<{ scene: THREE.Group }>((resolve, reject) => {

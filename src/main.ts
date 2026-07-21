@@ -1,10 +1,11 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { BoxGeometry, ConeGeometry, Mesh, MeshStandardMaterial, Vector3 } from 'three';
-import { CONFIG, type NpcTier } from './config';
+import { ConeGeometry, Mesh, MeshStandardMaterial, Vector3 } from 'three';
+import { CONFIG, type NpcTier, type Team } from './config';
 import { PhysicsWorld } from './core/PhysicsWorld';
 import { RenderScene } from './core/RenderScene';
 import { SyncBridge } from './core/SyncBridge';
 import { loadAssets } from './core/AssetLoader';
+import { TerrainSystem, type HeightmapData } from './core/TerrainSystem';
 import { AudioEngine } from './audio/AudioEngine';
 import { AudioAssets } from './audio/AudioAssets';
 import { SoundSystem } from './audio/SoundSystem';
@@ -20,6 +21,7 @@ import { DirectorSystem } from './systems/DirectorSystem';
 import { ResupplySystem } from './systems/ResupplySystem';
 import { CaptureSystem } from './systems/CaptureSystem';
 import { SkillSystem } from './systems/SkillSystem';
+import { FogOfWarSystem } from './systems/FogOfWarSystem';
 import { DebugConsole } from './utils/DebugConsole';
 import { createObjective, type Objective, type LevelConfig } from './systems/Objective';
 import { ResupplyPoint } from './entities/ResupplyPoint';
@@ -40,7 +42,8 @@ const log = Logger.create('main');
  *   applyDrive → physics.step → SyncBridge.sync
  *   → aimAndCamera → weapon.update → shake.update → destruction.update → render
  *
- * 调试模式支持按 Tab 在玩家 T-14 与静态坦克（虎式/M1）之间切换控制。
+ * 调试模式(TuningPanel)支持切换控制玩家 T-14 与静态坦克（虎式/M1）。
+ * Tab 键用于切换弹药类型(AP/HE)。
  */
 async function main(): Promise<void> {
   // 调试开关最早解析:URL ?debug 覆盖 CONFIG.debug.enabled。
@@ -58,6 +61,7 @@ async function main(): Promise<void> {
   let captureRef: CaptureSystem | undefined;
   // render 用确定赋值断言:onStart 闭包(定义早于赋值)需引用,但点击时已赋值,运行时安全
   let render!: RenderScene;
+  let terrain!: TerrainSystem;
 
   // 调参面板仅调试模式创建:slider 调手感 + 模拟受击/切换坦克按钮均属调试功能。
   // 非调试时整体不创建 → 用 config 默认值、无面板、无调试按钮。
@@ -71,7 +75,7 @@ async function main(): Promise<void> {
           const tank = switcherRef?.activeTank;
           if (!d || !tank) return;
           // 爆心设在当前活性坦克刚体前方 0.8m(车身内) → falloff 接近满伤。
-          // applyDamage 会自动跳过 activeTank,这里故意偏移爆心让它落在判定半径内。
+          // 注意:applyDamage 不传 excludeTank,activeTank 也会受到伤害(模拟受击测试)。
           const t = tank.body.translation();
           d.applyDamage({ x: t.x, y: t.y + 0.5, z: t.z + 0.8 }, CONFIG.destruction.explosionRadius, CONFIG.destruction.hitDamage);
         },
@@ -95,12 +99,26 @@ async function main(): Promise<void> {
   const audioAssets = new AudioAssets();
   audioEngine.bindAssets(audioAssets);
 
+  // 全局一次性音频解锁:任何用户交互(pointerdown/keydown/touchstart)都解锁 ctx。
+  // ------------------------------------------------------------
+  // 浏览器自动播放策略要求"用户手势"才能 resume AudioContext。原设计只在点"开始作战"
+  // 按钮时解锁,导致菜单阶段(选关/悬停)虽然已有用户交互,ctx 仍 suspended,菜单 BGM 无法播放。
+  // 这里挂全局监听,任一交互先到则解锁,unlock() 内部幂等(disabled||unlocked 直接 return),
+  // 后续点开始按钮再调一次也无害。once:true 保证每个事件只触发一次(避免重复 resume 调用)。
+  // 不能只挂 click:pointerdown 更早触发(响应用户期望"碰一下就有声"),touchstart 覆盖触屏。
+  const unlockEventTypes: Array<'pointerdown' | 'keydown' | 'touchstart'> = ['pointerdown', 'keydown', 'touchstart'];
+  const unlockHandler = (): void => { void audioEngine.unlock(); };
+  for (const evt of unlockEventTypes) {
+    window.addEventListener(evt, unlockHandler, { once: true });
+  }
+
   // overlay:加载界面(构造即显示)→ 菜单 → 结算。onStart/onRestart 用闭包读上方 let 占位。
   // 开始按钮点击 = 用户手势 → audioEngine.unlock() resume ctx(浏览器自动播放策略)。
+  // 注:此时 ctx 大概率已由上方全局监听解锁,这里再调一次仅作兜底(幂等)。
   const overlay = new Overlay(
     container,
     (levelId: string): void => {
-      // 用户手势:解锁音频(加载阶段 ctx 处于 suspended,此刻 resume)
+      // 用户手势:解锁音频(兜底;通常已由全局监听解锁)
       void audioEngine.unlock();
       // 选关启动:按 level 配置创建对应 Objective(读 director/capture 进度判定胜负)
       const director = directorRef!;
@@ -113,7 +131,7 @@ async function main(): Promise<void> {
       // 占领军专属:创建据点 + 激活占领系统 + 令现存 NPC 围绕据点巡逻(形成对抗)
       if (level.id === 'capture') {
         const cfg = CONFIG.capturePoint;
-        const zone = new CaptureZone(render, cfg.position);
+        const zone = new CaptureZone(render, { x: cfg.position.x, y: terrain.getHeight(cfg.position.x, cfg.position.z), z: cfg.position.z });
         // level 此处已收窄为 capture 关卡类型,enemyTarget 字段存在;歼灭战分支不进此块
         capture.setZone(zone, level.target, level.enemyTarget);
         director.setCaptureTarget(cfg.position, cfg.npcPatrolRadius);
@@ -129,9 +147,11 @@ async function main(): Promise<void> {
   // 统一资源加载(物理引擎 + 坦克数据 + 音效并行,进度回调更新加载界面)。
   // 硬依赖(physics/data)失败 → 显示加载失败面板 + 重试;音效失败降级静音不阻塞。
   let physics: PhysicsWorld;
+  let heightmap: HeightmapData | null;
   try {
     const result = await loadAssets(audioEngine.ctx, audioAssets, (p) => overlay.updateProgress(p));
     physics = result.physics;
+    heightmap = result.heightmap;
   } catch (e) {
     log.error('asset load failed', e);
     overlay.showLoadError('资源加载失败,请重试', () => location.reload());
@@ -143,16 +163,17 @@ async function main(): Promise<void> {
   render = new RenderScene(container);
   const hud = new HUD(container);
 
-  buildGround(physics, render);
+  // 地形(heightmap 驱动 mesh+heightfield;缺图回退平面)。持有 terrain 引用供放置物贴地
+  terrain = buildGround(physics, render, heightmap);
   buildMountains(physics, render);
 
   // 村庄情景(在坦克之前创建，便于坦克出生在前方空地)
   const destruction = new DestructionSystem(physics, render);
   destructionRef = destruction;
-  buildVillage(destruction);
+  buildVillage(destruction, terrain);
 
   // 按配置列表生成全部坦克(t14→Tank, tiger/abrams→StaticTank),统一进可附身列表
-  const { tanks: controllableTanks, switchable: switchableTanks, playerIndex } = buildTanks(physics, render, destruction);
+  const { tanks: controllableTanks, switchable: switchableTanks, playerIndex } = buildTanks(physics, render, destruction, terrain);
 
   // switcher 只接收非 NPC 坦克(玩家 Tab 不可附身敌方,避免双重控制);destruction/director 用全部
   const switcher = new TankSwitcher(switchableTanks, playerIndex);
@@ -164,7 +185,7 @@ async function main(): Promise<void> {
   // 补给系统(M5):先创建,再构建补给点(注册到 destruction 伤害链 + resupply 装填判定),
   // 之后 director 创建 NPC 时把 resupply 传入(NPC 弹药耗尽自主补给 + 注册装填)。
   const resupply = new ResupplySystem();
-  buildResupplyPoints(physics, render, destruction, resupply);
+  buildResupplyPoints(physics, render, destruction, resupply, terrain);
 
   // 占领系统(始终创建:歼灭战无 zone 时空转;占领军选关后 setZone 激活)。
   // 传给 director:NPC 创建/摧毁时注册/注销,纳入占领判定。
@@ -175,7 +196,7 @@ async function main(): Promise<void> {
 
   // 导演系统:接管 npc:true 的敌坦(possess+巡逻+每帧驱动)。传入 resupply:NPC 弹药机制
   // + capture:NPC 纳入占领判定(创建/摧毁时注册/注销)。未来 LLM 接入点
-  const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply, capture);
+  const director = new DirectorSystem(physics, render, destruction, controllableTanks, resupply, capture, terrain);
   directorRef = director; // 供 overlay.onStart 闭包读取
 
   // 调试控制台:暴露 tw.spawnEnemy/tw.revive/tw.hp 到浏览器 DevTools Console,便于调试 NPC 难度/玩家状态
@@ -184,7 +205,7 @@ async function main(): Promise<void> {
   const input = new InputSystem();
   input.attach();
 
-  const controller = new TankController(switcher.activeTank, render);
+  const controller = new TankController(switcher.activeTank, render, (x, z) => terrain.getHeight(x, z));
   const shake = new CameraShake(render.camera);
   const weapon = new WeaponSystem(() => switcher.activeTank, physics, render, shake, destruction);
   // M3 主动技能系统(玩家;getActiveTank 跟随 Tab 切换的活性坦克,各坦克技能状态独立)
@@ -214,6 +235,10 @@ async function main(): Promise<void> {
   const sound = new SoundSystem(audioEngine, () => switcher.activeTank, controllableTanks);
   weapon.setSoundHooks(sound);
   skill.setSoundHooks(sound);
+
+  // 战争迷雾:探索网格 + 雾遮罩 mesh(贴合 heightfield)+ 敌方显隐。
+  // 仅玩家提供视野(跟 Tab 切换);controllableTanks 共享引用(director spawn 的 NPC 自动纳入显隐)。
+  const fog = new FogOfWarSystem(render, terrain, () => switcher.activeTank, controllableTanks, () => destruction.getFogObstacles());
   destruction.setSoundHooks(sound);
   // 注入到导演系统:NPC weapon 补注入,使 NPC 开火也有机械音(语音 isPlayer 过滤不播)
   director.setSoundHooks(sound);
@@ -228,16 +253,25 @@ async function main(): Promise<void> {
   // 用闭包读 main 的 objective 变量最新值(选关回调赋值后 loop 即可见)
   const loop = startLoop(
     physics, render, input, switcher, controller, weapon, skill, shake, destruction,
-    hud, director, resupply, capture, () => objective, overlay, game, sound,
+    hud, director, resupply, capture, () => objective, overlay, game, sound, fog,
   );
 
   // 注册清理回调：HMR/页面卸载时停止循环、解绑输入、释放资源，防止内存泄漏与重复监听
   const cleanup = (): void => {
     loop.stop();
     sound.dispose();
+    audioEngine.dispose();
+    fog.dispose();
     tuningPanel?.dispose();
     for (const tank of controllableTanks) tank.dispose();
     render.dispose();
+    // 释放物理世界 wasm 堆内存 + 清空 SyncBridge 绑定(HMR 重载时防泄漏)
+    SyncBridge.clear();
+    physics.dispose();
+    // 移除音频解锁监听器(HMR 重载时防累积)
+    for (const evt of unlockEventTypes) {
+      window.removeEventListener(evt, unlockHandler);
+    }
   };
   (window as unknown as { __tankWarCleanup__?: () => void }).__tankWarCleanup__?.();
   (window as unknown as { __tankWarCleanup__?: () => void }).__tankWarCleanup__ = cleanup;
@@ -247,30 +281,21 @@ async function main(): Promise<void> {
   });
 }
 
-/** 地面 */
-function buildGround(physics: PhysicsWorld, render: RenderScene): void {
-  const gh = CONFIG.ground.halfSize;
-  const body = physics.world.createRigidBody(
-    RAPIER.RigidBodyDesc.fixed().setTranslation(0, -gh.y, 0),
-  );
-  physics.world.createCollider(
-    RAPIER.ColliderDesc.cuboid(gh.x, gh.y, gh.z).setActiveEvents(
-      RAPIER.ActiveEvents.COLLISION_EVENTS,
-    ),
-    body,
-  );
-  const mesh = new Mesh(
-    new BoxGeometry(gh.x * 2, gh.y * 2, gh.z * 2),
-    new MeshStandardMaterial({ color: 0x4a5d3a }),
-  );
-  mesh.position.set(0, -gh.y, 0);
-  mesh.receiveShadow = true;
-  render.scene.add(mesh);
-  log.info('ground created', { topY: 0 });
+/**
+ * 地面(地形系统)
+ * ------------------------------------------------------------
+ * 用 TerrainSystem 从 heightmap 构建带高度的视觉 mesh + 物理 heightfield collider。
+ * heightmap 缺失时 TerrainSystem 自动回退全 0 高度(平面),等价原 flat 地面。
+ * 返回 TerrainSystem 实例,供后续放置物(树/建筑/坦克出生点)调 getHeight 贴地。
+ */
+function buildGround(physics: PhysicsWorld, render: RenderScene, heightmap: HeightmapData | null): TerrainSystem {
+  const terrain = new TerrainSystem(physics, render, heightmap);
+  terrain.build();
+  return terrain;
 }
 
 /** 布置村庄：房屋(砖墙+屋顶) + 水泥塔 + 栅栏 + 树 */
-function buildVillage(destruction: DestructionSystem): void {
+function buildVillage(destruction: DestructionSystem, terrain: TerrainSystem): void {
   // 房屋(4 栋，地图扩大一倍后位置 ×2；房屋自身尺寸不变)
   const houses = [
     { x: -32, z: 24, size: { x: 6, y: 5, z: 6 } },
@@ -279,17 +304,17 @@ function buildVillage(destruction: DestructionSystem): void {
     { x: 40, z: -24, size: { x: 6, y: 5, z: 5 } },
   ];
   for (const h of houses) {
-    destruction.addHouse({ x: h.x, y: 0, z: h.z }, h.size);
+    destruction.addHouse({ x: h.x, y: terrain.getHeight(h.x, h.z), z: h.z }, h.size);
   }
 
-  // 水泥塔(2 座，弹坑式渐进破坏，村庄两侧；位置 ×2)
-  destruction.addTower({ x: -60, y: 4, z: -4 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
-  destruction.addTower({ x: 64, y: 4, z: 8 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
+  // 水泥塔(2 座，弹坑式渐进破坏，村庄两侧；位置 ×2)。y=地形高度+原抬高量4(塔中心相对地面)
+  destruction.addTower({ x: -60, y: terrain.getHeight(-60, -4) + 4, z: -4 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
+  destruction.addTower({ x: 64, y: terrain.getHeight(64, 8) + 4, z: 8 }, { x: 2, y: 7, z: 2 }, { x: 3.2, y: 1, z: 3.2 });
 
-  // 栅栏(几排，可被坦克推倒；位置 ×2)
-  destruction.addFenceRow({ x: -12, z: 44 }, { x: 16, z: 44 }, 8);
-  destruction.addFenceRow({ x: -12, z: 52 }, { x: 16, z: 52 }, 8);
-  destruction.addFenceRow({ x: 52, z: -44 }, { x: 76, z: -44 }, 7);
+  // 栅栏(几排，可被坦克推倒；位置 ×2)。heightFn 贴地(微起伏下立柱跟随地形)
+  destruction.addFenceRow({ x: -12, z: 44 }, { x: 16, z: 44 }, 8, (x, z) => terrain.getHeight(x, z));
+  destruction.addFenceRow({ x: -12, z: 52 }, { x: 16, z: 52 }, 8, (x, z) => terrain.getHeight(x, z));
+  destruction.addFenceRow({ x: 52, z: -44 }, { x: 76, z: -44 }, 7, (x, z) => terrain.getHeight(x, z));
 
   // 树(随机散布，避开楼房/塔/栅栏/坦克出生点)
   const occupied: { x: number; z: number; r: number }[] = [
@@ -316,7 +341,7 @@ function buildVillage(destruction: DestructionSystem): void {
       }
     }
     if (!ok) continue;
-    destruction.addTree({ x, y: 0, z });
+    destruction.addTree({ x, y: terrain.getHeight(x, z), z });
     occupied.push({ x, z, r: 1.5 });
     placed++;
   }
@@ -335,9 +360,10 @@ function buildResupplyPoints(
   render: RenderScene,
   destruction: DestructionSystem,
   resupply: ResupplySystem,
+  terrain: TerrainSystem,
 ): void {
   for (const p of CONFIG.resupplyPoint.points) {
-    const rp = new ResupplyPoint(physics, render, { x: p.x, z: p.z });
+    const rp = new ResupplyPoint(physics, render, { x: p.x, y: terrain.getHeight(p.x, p.z), z: p.z });
     destruction.addResupplyPoint(rp);
     resupply.addPoint(rp);
   }
@@ -362,6 +388,8 @@ function buildTanks(
   physics: PhysicsWorld,
   render: RenderScene,
   destruction: DestructionSystem,
+  /** 地形(供坦克出生点贴地 getHeight) */
+  terrain: TerrainSystem,
 ): { tanks: IControllableTank[]; switchable: IControllableTank[]; playerIndex: number } {
   const tanks: IControllableTank[] = [];
   const switchable: IControllableTank[] = [];
@@ -370,9 +398,12 @@ function buildTanks(
 
   for (let i = 0; i < CONFIG.tanks.length; i++) {
     const cfg = CONFIG.tanks[i];
+    // 地形贴地:出生点 Y 取该位置地形高度(微起伏下坦克不悬浮/不穿地)
+    const spawn = { x: cfg.spawn.x, y: terrain.getHeight(cfg.spawn.x, cfg.spawn.z), z: cfg.spawn.z };
     let tank: IControllableTank;
     try {
-      tank = createTank(cfg.variant, physics, render, cfg.spawn, cfg.yaw, (cfg as { tier?: NpcTier }).tier);
+      const team = (cfg as { team?: Team }).team ?? 'neutral';
+      tank = createTank(cfg.variant, physics, render, spawn, cfg.yaw, team, (cfg as { tier?: NpcTier }).tier);
     } catch (e) {
       // 未知 variant:as const 下编译期不可达,运行期兜底(永不静默失败)
       log.error('unknown tank variant, skipped', { variant: cfg.variant, index: i, err: String(e) });
@@ -473,6 +504,8 @@ function startLoop(
   game: { state: GameState; startTime: number },
   /** 音效系统:每帧更新监听器 + 引擎循环音(menu/结算时也更新,保持空间化正确) */
   sound: SoundSystem,
+  /** 战争迷雾:每帧推进视野圆 + 切敌方显隐(仅 playing) */
+  fog: FogOfWarSystem,
 ): { stop: () => void } {
   const dt = CONFIG.loop.fixedTimeStep;
   const maxSub = CONFIG.loop.maxSubSteps;
@@ -480,11 +513,17 @@ function startLoop(
   let last = performance.now();
   let acc = 0;
   let frame = 0;
-  let prevSwitchNext = false;
   let rafId = 0;
   let running = true;
   /** 上一帧游戏状态(BGM 切换检测:状态变化时切背景音乐) */
-  let prevBgmState: GameState = game.state;
+  // 用 '' 哨兵值强制第一帧进入 BGM 状态驱动分支。
+  // ------------------------------------------------------------
+  // startLoop 调用时 game.state 已是 'menu'(loading→menu 切换发生在第 234 行,startLoop 之前);
+  // 若 prevBgmState 初值也是 'menu',第一帧 `game.state !== prevBgmState` 为 false,
+  // 永远不会调 setBgmState('loading'),菜单阶段 bgmState 一直是初始 'none',
+  // 即使 ctx 已解锁,refreshBgm 也只走 stopBgm(无 source 时空操作)→ 菜单 BGM 不响。
+  // 用 '' 哨兵(任何 GameState 都不为 '')保证第一帧触发,让菜单阶段正确进入 loading BGM 状态。
+  let prevBgmState: GameState | '' = '';
   // 音效用复用向量(避免每帧 new):相机朝向 getWorldDirection 写入此对象
   const camForward = new Vector3();
 
@@ -506,12 +545,6 @@ function startLoop(
       else sound.setBgmState('none'); // won/lost:结算界面停 BGM
     }
 
-    // Tab 切换仅在调试模式 + playing 时生效(menu/结算不切)
-    if (playing && isDebug() && inputState.switchNext && !prevSwitchNext) {
-      switcher.next();
-    }
-    prevSwitchNext = inputState.switchNext;
-
     const activeTank = switcher.activeTank;
     // 菜单显隐(按状态控制,幂等)
     if (game.state === 'menu') overlay.showMenu();
@@ -530,10 +563,10 @@ function startLoop(
       },
       getObjective(),
       [
-        // M3 技能栏数据(顺序 repair/boost/armor,与 HUD.SKILL_META 一致)
-        { id: 'repair', cdRatio: skill.cooldownRatio('repair'), active: skill.isActive('repair') },
+        // 技能栏数据(顺序 boost/armor/scout,与 HUD.SKILL_META 一致)
         { id: 'boost', cdRatio: skill.cooldownRatio('boost'), active: skill.isActive('boost') },
         { id: 'armor', cdRatio: skill.cooldownRatio('armor'), active: skill.isActive('armor') },
+        { id: 'scout', cdRatio: skill.cooldownRatio('scout'), active: skill.isActive('scout') },
       ],
     );
     overlay.updatePosture(director.posture);
@@ -573,6 +606,7 @@ function startLoop(
       destruction.update(frameTime);
       resupply.update(frameTime); // 补给点再生 + 装填判定(M5)
       capture.update(frameTime); // 占领进度推进(占领军);歼灭战空转
+      fog.update(frameTime); // 战争迷雾:视野圆推进 + 雾纹理刷新 + 敌方显隐(仅 playing)
     }
     controller.updateCamera(); // 始终:menu/结算时相机也看战场背景
 

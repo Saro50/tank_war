@@ -53,9 +53,11 @@ export class Smoke {
 
   /** 更新粒子 + 按强度发射新粒子。@returns 始终 true(持续源,由 owner 决定何时 dispose) */
   update(dt: number): boolean {
+    // clamp dt:标签页切换回来/卡顿时 dt 可能很大,单帧 spawn 上百粒子(每个创建 Mesh+Material)导致帧率崩溃
+    const cdt = Math.min(dt, 0.1);
     // 按强度发射:intensity 越高,每秒发射越多(scale 放大击毁浓烟密度)
     const emitRate = this.intensity * 18 * this.scale; // 满强度 18×scale 粒/秒
-    this.emitAcc += emitRate * dt;
+    this.emitAcc += emitRate * cdt;
     while (this.emitAcc >= 1) {
       this.emitAcc -= 1;
       this.spawn();
@@ -64,7 +66,7 @@ export class Smoke {
     // 推进现有粒子
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
-      p.age += dt;
+      p.age += cdt;
       const t = p.age / p.life;
       if (t >= 1) {
         // 回收:dispose 材质 + 移除 mesh
@@ -73,10 +75,10 @@ export class Smoke {
         this.particles.splice(i, 1);
         continue;
       }
-      p.mesh.position.x += p.vx * dt;
-      p.mesh.position.y += p.vy * dt;
-      p.mesh.position.z += p.vz * dt;
-      p.vy += 0.5 * dt; // 持续上飘(烟自然升腾)
+      p.mesh.position.x += p.vx * cdt;
+      p.mesh.position.y += p.vy * cdt;
+      p.mesh.position.z += p.vz * cdt;
+      p.vy += 0.5 * cdt; // 持续上飘(烟自然升腾)
       p.vx *= 0.97;
       p.vz *= 0.97;
       p.mesh.scale.setScalar(p.s0 * (1 + t * 2.2)); // 烟雾膨胀(比尘雾更明显)

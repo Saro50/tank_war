@@ -2,6 +2,7 @@ import { CONFIG } from '../config';
 import { PhysicsWorld } from './PhysicsWorld';
 import { TankDataStore } from '../data/TankDataStore';
 import { GltfTankAsset } from '../entities/GltfTankAsset';
+import { loadHeightmap, type HeightmapData } from './TerrainSystem';
 import type { AudioAssets } from '../audio/AudioAssets';
 import { Logger } from '../utils/Logger';
 
@@ -25,6 +26,7 @@ interface PhaseTiming {
   data: number;
   audio: number;
   glb: number;
+  terrain: number;
 }
 
 /**
@@ -42,6 +44,7 @@ interface PhaseTiming {
  *  - 坦克数据:1 项(JSON fetch + zod 校验)
  *  - 音效:每个文件 1 项(5 机械音 + 2 BGM + 4 语音 = 11 项,单语言)
  *  - glb 模型:1 项(仅当 config.tanks 含 variant:'gltf' 时)
+ *  - heightmap:1 项(地形高度图,始终加载;缺失回退平面,不阻塞)
  *
  * @param ctx          AudioContext(suspended 态,供音频解码)
  * @param audioAssets  音频资源仓库(loadAll 写入其内部缓存)
@@ -52,20 +55,20 @@ export async function loadAssets(
   ctx: AudioContext,
   audioAssets: AudioAssets,
   onProgress: (p: LoadProgress) => void,
-): Promise<{ physics: PhysicsWorld; timing: PhaseTiming }> {
+): Promise<{ physics: PhysicsWorld; heightmap: HeightmapData | null; timing: PhaseTiming }> {
   // 是否启用 glb 玩家坦克(检测 config.tanks 是否有 variant:'gltf')
   const hasGltf = CONFIG.tanks.some((t) => t.variant === 'gltf');
-  // 总项数 = 1(physics) + 1(data) + 音频文件数 + (有 glb 时)1
+  // 总项数 = 1(physics) + 1(data) + 音频文件数 + (有 glb 时)1 + 1(heightmap)
   // 音频 = 5 机械音(cannon+engine_idle/full+driving_low/high) + 2 BGM + 4 语音(单语言)
   const voiceCount = CONFIG.audio.voiceLang === 'both' ? 8 : 4;
-  const total = 1 + 1 + 5 + 2 + voiceCount + (hasGltf ? 1 : 0);
+  const total = 1 + 1 + 5 + 2 + voiceCount + (hasGltf ? 1 : 0) + 1;
   let done = 0;
   const tick = (label: string): void => {
     done++;
     onProgress({ done, total, label });
   };
 
-  const timing: PhaseTiming = { physics: 0, data: 0, audio: 0, glb: 0 };
+  const timing: PhaseTiming = { physics: 0, data: 0, audio: 0, glb: 0, terrain: 0 };
 
   // 并行加载;physics/data/glb 是硬依赖(失败抛出),audio 软依赖(内部降级)
   const physicsPromise = (async (): Promise<PhysicsWorld> => {
@@ -100,8 +103,17 @@ export async function loadAssets(
       })()
     : Promise.resolve();
 
-  // allSettled:audio 失败不影响整体(内部已捕获);physics/data/glb 失败 → 抛出
-  const results = await Promise.allSettled([physicsPromise, dataPromise, audioPromise, glbPromise]);
+  // heightmap 地形高度图(始终加载;缺失/失败返回 null,TerrainSystem 回退平面)。
+  const heightmapPromise = (async (): Promise<HeightmapData | null> => {
+    const t0 = performance.now();
+    const hm = await loadHeightmap(`${import.meta.env.BASE_URL}${CONFIG.ground.terrain.heightmap}`);
+    timing.terrain = performance.now() - t0;
+    tick('地形高度图');
+    return hm;
+  })();
+
+  // allSettled:audio/heightmap 失败不影响整体(软依赖);physics/data/glb 失败 → 抛出
+  const results = await Promise.allSettled([physicsPromise, dataPromise, audioPromise, glbPromise, heightmapPromise]);
 
   // 检查硬依赖:physics(0)/data(1)/glb(3,仅启用时)任一失败 → 抛出
   if (results[0].status === 'rejected') {
@@ -124,8 +136,10 @@ export async function loadAssets(
     log.error('glb load failed', { err: String(results[3].reason) });
     throw err;
   }
+  // heightmap(4)软依赖:失败/缺失返回 null(loadHeightmap 内已处理回退),TerrainSystem 自动平面
 
   const physics = (results[0] as PromiseFulfilledResult<PhysicsWorld>).value;
-  log.info('assets loaded', { ...timing, done, total });
-  return { physics, timing };
+  const heightmap = (results[4] as PromiseFulfilledResult<HeightmapData | null>).value ?? null;
+  log.info('assets loaded', { ...timing, done, total, hasHeightmap: !!heightmap });
+  return { physics, heightmap, timing };
 }

@@ -9,7 +9,7 @@ import {
   Quaternion,
   Vector3,
 } from 'three';
-import { CONFIG, type NpcTier } from '../../config';
+import { CONFIG, type NpcTier, type Team } from '../../config';
 import type { PhysicsWorld } from '../../core/PhysicsWorld';
 import type { RenderScene } from '../../core/RenderScene';
 import { SyncBridge } from '../../core/SyncBridge';
@@ -58,8 +58,8 @@ export abstract class StaticTankBase extends TankBase {
    */
   protected abstract get variant(): 'tiger' | 'abrams';
 
-  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, yaw: number, tier?: NpcTier) {
-    super(physics, render, spawn, tier);
+  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, team: Team, yaw: number, tier?: NpcTier) {
+    super(physics, render, spawn, team, tier);
     // 静态坦克出生带朝向
     this.body.setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }, true);
   }

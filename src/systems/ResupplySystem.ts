@@ -1,3 +1,4 @@
+import { CONFIG } from '../config';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { ResupplyPoint } from '../entities/ResupplyPoint';
 import type { WeaponSystem } from './WeaponSystem';
@@ -58,23 +59,36 @@ export class ResupplySystem {
     this.tanks = this.tanks.filter((entry) => entry.getTank() !== tank);
   }
 
-  /** 每帧:补给点生命周期 + 装填判定 */
+  /**
+   * 每帧:补给点生命周期 + 补给判定(弹药装填 + 维修回血)
+   * ------------------------------------------------------------
+   * 坦克驶入任一可用补给点半径内:
+   *  ① 弹药不满 → weapon.resupply(dt) 装 HE(AP rate=0 不补)
+   *  ② 回血 → tank.heal(repairRate*dt) 持续维修(替代原脱战回血+维修技能)
+   * 不能因"弹药满"就 continue——还需要回血(HP 不满时仍需驻留维修)。
+   */
   update(dt: number): void {
     // 1. 补给点更新(destroyed 倒计时再生;intact 标识旋转)
     for (const rp of this.points) rp.update(dt);
 
-    // 2. 装填判定:坦克驶入任一可用补给点半径内 → 自动回弹
+    // 2. 补给判定:坦克驶入任一可用补给点半径内 → 补弹药 + 回血
+    const repairRate = CONFIG.resupplyPoint.repairRate;
     for (const { getTank, weapon } of this.tanks) {
       const tank = getTank();
       if (tank.state !== 'intact') continue;
-      if (weapon.isAmmoFull()) continue; // 所有弹种都满则不装填(省调用)
       const p = tank.body.translation();
+      let inRange = false;
       for (const rp of this.points) {
         if (rp.contains({ x: p.x, z: p.z })) {
-          weapon.resupply(dt);
-          break; // 在一个补给点范围内即装填,无需叠加多源
+          inRange = true;
+          break;
         }
       }
+      if (!inRange) continue;
+      // 补弹药(不满才补,省调用;AP rate=0 自动不补)
+      if (!weapon.isAmmoFull()) weapon.resupply(dt);
+      // 回血(补给点维修,唯一回血途径)
+      tank.heal(repairRate * dt);
     }
   }
 

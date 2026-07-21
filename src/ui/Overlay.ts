@@ -153,8 +153,8 @@ export class Overlay {
       .map(
         (level) => `
       <div id="tw-level-${level.id}" class="tw-level-card ${level.id === this.selectedLevelId ? 'tw-level-selected' : ''}">
-        <div class="tw-level-name">${level.name}</div>
-        <div class="tw-level-brief">${level.brief}</div>
+        <div class="tw-level-name">${escapeHtml(level.name)}</div>
+        <div class="tw-level-brief">${escapeHtml(level.brief)}</div>
       </div>`,
       )
       .join('');
@@ -271,8 +271,8 @@ export class Overlay {
       this.resultTitle.style.color = '#ff5252';
     }
     this.resultDetail.innerHTML =
-      `目标:${stats.objectiveDesc}<br>` +
-      `击毁 <b style="color:#ffcc33">${stats.kills}</b> 辆 &nbsp;&middot;&nbsp; 用时 <b style="color:#e6e6e6">${stats.timeText}</b>`;
+      `目标:${escapeHtml(stats.objectiveDesc)}<br>` +
+      `击毁 <b style="color:#ffcc33">${stats.kills}</b> 辆 &nbsp;&middot;&nbsp; 用时 <b style="color:#e6e6e6">${escapeHtml(stats.timeText)}</b>`;
     this.resultEl.style.display = 'flex';
   }
   hideResult(): void {
@@ -291,6 +291,13 @@ export class Overlay {
     void this.bannerEl.offsetWidth;
     this.bannerEl.classList.add('tw-banner-show');
   }
+}
+
+/** HTML 转义:防 XSS(配置数据虽可信,但外部数据进入时可防注入) */
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]!);
 }
 
 // —— 样式常量 ——

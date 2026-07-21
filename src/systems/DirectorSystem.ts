@@ -2,6 +2,7 @@ import { CONFIG } from '../config';
 import type { IControllableTank } from '../entities/IControllableTank';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { RenderScene } from '../core/RenderScene';
+import type { TerrainSystem } from '../core/TerrainSystem';
 import { createTank } from '../entities/tanks/registry';
 import { StaticTankBase } from '../entities/tanks/StaticTankBase';
 import { TankController } from './TankController';
@@ -45,8 +46,6 @@ export class DirectorSystem {
   private npcWeapons: WeaponSystem[] = [];
   /** tank → NpcController 映射(玩家附身时按 tank 查找并暂停/恢复其 AI) */
   private readonly npcByTank = new Map<IControllableTank, NpcController>();
-  /** 每辆坦克的阵营(与 allTanks 同序),用于敌我判定 */
-  private teams: string[];
 
   // —— 导演策略状态(A1 波次 + A2 姿态) ——
   /** 当前全阵营姿态;public 供 NpcController 闭包读取修饰行为参数 */
@@ -78,35 +77,33 @@ export class DirectorSystem {
     private readonly resupply: ResupplySystem,
     /** 占领系统:NPC 创建/摧毁时注册/注销,纳入占领判定。歼灭战无 zone 时空转 */
     private readonly capture: CaptureSystem,
+    /** 地形:NPC 出生点贴地 getHeight(微起伏地形下不悬浮/不穿地) */
+    private readonly terrain: TerrainSystem,
   ) {
-    // 从 CONFIG.tanks 派生阵营(与 allTanks 同序;buildTanks 保证顺序一致)
-    this.teams = CONFIG.tanks.map((t) => t.team ?? 'neutral');
-    // 找玩家坦克(team==='player'):姿态评估(残血时 aggro)+ 死亡检测(Game Over)
-    const playerIdx = this.teams.indexOf('player');
-    this.playerTank = playerIdx >= 0 ? this.allTanks[playerIdx] : undefined;
+    // 找玩家坦克:直接遍历 allTanks 找 team==='player'(不依赖 CONFIG 索引对齐,
+    // 避免 buildTanks 跳过未知 variant 时 allTanks 与 CONFIG.tanks 长度不一致导致索引错位)
+    this.playerTank = this.allTanks.find((t) => t.team === 'player');
     this.initNpcs();
   }
 
-  /** 启动:接管所有 npc:true 的坦克 */
+  /** 启动:接管所有敌方坦克(team==='enemy') */
   private initNpcs(): void {
-    for (let i = 0; i < CONFIG.tanks.length; i++) {
-      const cfg = CONFIG.tanks[i];
-      // npc 字段仅敌坦项有(as const 联合形状不同),用断言安全访问
-      if (!(cfg as { npc?: boolean }).npc) continue;
-      const tank = this.allTanks[i];
-      if (!tank) continue;
+    // 遍历 allTanks(而非 CONFIG.tanks):直接用实体 team 字段判定,
+    // 避免 buildTanks 跳过未知 variant 时索引错位导致 NPC 漏接管/错接管。
+    for (const tank of this.allTanks) {
+      if (tank.team !== 'enemy') continue;
+      const tier = tank.tier ?? 'regular';
       tank.possess(); // fixed→dynamic,使可驾驶(NPC 复用玩家驾驶层)
       // 每 NPC 独立的驾驶控制器(复用 TankController,但不调 updateCamera)
-      const controller = new TankController(tank, this.render);
+      const controller = new TankController(tank, this.render, (x, z) => this.terrain.getHeight(x, z));
       // 每 NPC 独立的武器(shake=undefined:NPC 开火不震玩家相机)
       const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
       // 注入音效(若已设):NPC 开火机械音;语音 isPlayer 过滤不播。setSoundHooks 在构造后调用时补注入
       if (this.sound) weapon.setSoundHooks(this.sound);
       // 按档位(tier)解析难度参数注入;缺失回退 regular(老兵)
-      const tierKey = (cfg as { tier?: string }).tier;
-      const profile = resolveNpcProfile(tierKey);
+      const profile = resolveNpcProfile(tier);
       // M3:veteran 注入技能系统(rookie/regular 不传 skill,保持纯机械 AI——平衡性)
-      const skill = tierKey === 'veteran' ? new SkillSystem(() => tank) : undefined;
+      const skill = tier === 'veteran' ? new SkillSystem(() => tank) : undefined;
       const npc = new NpcController(tank, controller, weapon, () => this.enemiesOf(tank), this.physics, profile, this.resupply, () => this.posture, skill);
       npc.setMission(this.pickPatrolMission());
       this.npcs.push(npc);
@@ -122,10 +119,9 @@ export class DirectorSystem {
 
   /** 返回某 NPC 的敌方候选(team==='player' 且存活)。首期=玩家 */
   private enemiesOf(self: IControllableTank): IControllableTank[] {
-    const idx = this.allTanks.indexOf(self);
-    if (idx < 0) return [];
+    // 直接读 tank.team 实体字段(不依赖 teams 数组索引对齐,修复 spawn/buildTanks 错位 BUG)
     return this.allTanks.filter(
-      (t, i) => t !== self && t.state === 'intact' && this.teams[i] === 'player',
+      (t) => t !== self && t.state === 'intact' && t.team === 'player',
     );
   }
 
@@ -261,12 +257,12 @@ export class DirectorSystem {
    */
   spawnEnemyAt(opts: { variant: string; tier: NpcTier; x: number; z: number }): void {
     const { variant, tier, x, z } = opts;
-    const tank = createTank(variant, this.physics, this.render, { x, y: 0, z }, 0, tier);
+    const tank = createTank(variant, this.physics, this.render, { x, y: this.terrain.getHeight(x, z), z }, 0, 'enemy', tier);
     if (tank instanceof StaticTankBase) this.destruction.addStaticTank(tank);
     this.allTanks.push(tank); // 共享引用 → destruction.controllableTanks 自动包含(炮弹伤害)
     this.destruction.registerTank(tank); // 补 collider 映射(撞击判定)
     tank.possess(); // fixed→dynamic 可驾驶
-    const controller = new TankController(tank, this.render);
+    const controller = new TankController(tank, this.render, (x, z) => this.terrain.getHeight(x, z));
     const weapon = new WeaponSystem(() => tank, this.physics, this.render, undefined, this.destruction);
     if (this.sound) weapon.setSoundHooks(this.sound); // 注入音效:NPC 开火机械音
     const profile = resolveNpcProfile(tier);
@@ -296,7 +292,7 @@ export class DirectorSystem {
       this.setPosture('normal');
       return;
     }
-    const playerHpRatio = this.playerTank.getHp() / CONFIG.tank.damage.maxHp;
+    const playerHpRatio = this.playerTank.getHp() / this.playerTank.getMaxHp();
     if (playerHpRatio < CONFIG.director.aggroPlayerHpRatio) {
       this.setPosture('aggro');
       return;

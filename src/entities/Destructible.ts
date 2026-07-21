@@ -33,6 +33,11 @@ const UP = new Vector3(0, 1, 0);
  */
 export class Destructible {
   state: 'intact' | 'destroyed' = 'intact';
+
+  /** 迷雾显隐:供 FogOfWarSystem 按视野格子切 visible */
+  setVisibility(v: boolean): void {
+    this.mesh.visible = v;
+  }
   readonly body: RAPIER.RigidBody;
   private readonly mesh: Mesh;
   private readonly physics: PhysicsWorld;

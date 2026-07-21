@@ -68,8 +68,7 @@ const EMPTY_INPUT: InputState = {
   turretDir: 0,
   barrelDir: 0,
   fire: false,
-  switchNext: false,
-  switchAmmo: null,
+        cycleAmmo: false,
   skill: null,
   mouseX: 0,
   mouseY: 0,
@@ -108,6 +107,9 @@ export class NpcController {
   private stuckTimer = 0; // 卡住累计:想前进但速度低,超 0.4s 触发脱困
   private unstuckTimer = 0; // 脱困(后退)剩余时间:触发后到期恢复正常前进
   private unstuckDir = 0; // 脱困固定转向侧(±1,触发时随机),避免左右横跳转不开
+  /** LOS 检查节流(避免每帧 raycast:N 辆 NPC 每帧 N 次 raycast 影响性能) */
+  private losTimer = 0;
+  private losCache = false;
 
   // —— 瞄准系统状态(本需求新增) ——
   /** 瞄准锁定累计(s):炮塔+炮管持续收敛且目标可见时累计,达 profile.aimTime 才可开火;
@@ -258,14 +260,14 @@ export class NpcController {
   }
 
   /**
-   * 技能决策(M3,仅 veteran)。
+   * 技能决策(仅 veteran)。
    * ------------------------------------------------------------
    * rookie/regular 无 skill(undefined)直接返回,保持纯机械 AI(平衡性)。
    * veteran 按态势触发:
-   *  - 残血 + 脱战(无视线/远)→ 维修(战斗中修是送死,须脱战)
    *  - 中血 + 正交战 → 装甲倾斜(硬换窗口)
    *  - 目标远 + approach → 引擎过载(冲锋逼近)
    *  - 残血 + retreat → 引擎过载(逃跑加速)
+   * 维修已移至补给点(驶入自动回血),不再作为技能决策。
    * tryActivate 内部 CD/激活去重,高频调用幂等无副作用。
    */
   private thinkSkill(): void {
@@ -274,14 +276,6 @@ export class NpcController {
     const hpRatio = this.maxHp > 0 ? this.tank.getHp() / this.maxHp : 1;
     const dist = this.distTo(this.target);
     const cfg = CONFIG.combat.npcSkill;
-    // 维修:残血 + 脱战(无视线或远,避免战斗中站桩送死)
-    if (hpRatio < cfg.repairHpRatio) {
-      const hasLOS = hasLineOfSight(this.physics, this.tank, this.target);
-      if (!hasLOS || dist > this.profile.fireRange * 1.3) {
-        this.skill.tryActivate('repair');
-        return;
-      }
-    }
     // 装甲倾斜:中血 + 正交战(硬换窗口)
     if (hpRatio < cfg.armorHpRatio && this.state === 'engage') {
       this.skill.tryActivate('armor');
@@ -293,7 +287,7 @@ export class NpcController {
       return;
     }
     // 引擎过载:残血逃跑加速
-    if (hpRatio < cfg.repairHpRatio && this.state === 'retreat') {
+    if (hpRatio < cfg.retreatHpRatio && this.state === 'retreat') {
       this.skill.tryActivate('boost');
     }
   }
@@ -383,7 +377,13 @@ export class NpcController {
         return;
       }
       const dist = this.distTo(this.target);
-      const hasLOS = hasLineOfSight(this.physics, this.tank, this.target);
+      // LOS 节流:每 0.15s 检查一次(避免每帧 raycast,N 辆 NPC 每帧 N 次 raycast 影响性能)
+      this.losTimer -= dt;
+      if (this.losTimer <= 0) {
+        this.losCache = hasLineOfSight(this.physics, this.tank, this.target);
+        this.losTimer = 0.15;
+      }
+      const hasLOS = this.losCache;
       // 在射程(按档位)且有视线 → ENGAGE;否则 APPROACH
       this.state = dist <= this.profile.fireRange && hasLOS ? 'engage' : 'approach';
     } else {
@@ -423,22 +423,6 @@ export class NpcController {
 
   /** 各状态产出虚拟 InputState */
   private produceInput(): InputState {
-    // M3:维修激活时强制站桩(castMaxSpeed 约束),覆盖移动但保留瞄准/开火。
-    // NPC 维修期间是靶子,玩家可趁机绕侧——这是 veteran 维修的战术破绽,平衡其技能优势。
-    if (this.skill?.isActive('repair')) {
-      return {
-        forward: 0,
-        turn: 0,
-        turretDir: this.target ? this.aimTurn(this.target) : 0,
-        barrelDir: this.target ? this.aimBarrel(this.target) : 0,
-        fire: this.decideFire(),
-        switchNext: false,
-        switchAmmo: null,
-        skill: null,
-        mouseX: 0,
-        mouseY: 0,
-      };
-    }
     switch (this.state) {
       case 'patrol':
         return this.patrolInput();
@@ -468,7 +452,7 @@ export class NpcController {
       this.missionWpIdx = (this.missionWpIdx + 1) % this.mission.waypoints.length;
     }
     const scan = Math.sin(performance.now() * 0.0008) * 0.5; // 炮塔缓慢扫描
-    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: scan, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
+    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: scan, barrelDir: 0, fire: false, cycleAmmo: false, skill: null, mouseX: 0, mouseY: 0 };
   }
 
   /** APPROACH:朝目标移动,炮塔指向目标 */
@@ -481,8 +465,7 @@ export class NpcController {
       turretDir: this.aimTurn(this.target),
       barrelDir: this.aimBarrel(this.target), // 接近途中预瞄炮管(抛物线弹道补偿),进射程即可打
       fire: false, // 接近中不开火(专注机动逼近),留给 engage/retreat
-      switchNext: false,
-      switchAmmo: null,
+  cycleAmmo: false,
       skill: null,
       mouseX: 0,
       mouseY: 0,
@@ -517,6 +500,10 @@ export class NpcController {
     if (avoid !== 0) {
       turn = avoid;
       fwd *= 0.3; // 避障减速:给转向反应时间,避免 9m/s 高速撞障(BUG2)
+    } else {
+      // 同步 lastTurn:avoidanceTurn 在两侧通畅时依赖 lastTurn 决定偏向,
+      // engage 状态不调 driveToward(才写 lastTurn),需在此同步避免陈旧值
+      this.lastTurn = turn;
     }
     return {
       forward: fwd,
@@ -524,8 +511,7 @@ export class NpcController {
       turretDir: this.aimTurn(this.target),
       barrelDir: this.aimBarrel(this.target), // 炮管俯仰:抛物线弹道补偿
       fire: this.decideFire(),
-      switchNext: false,
-      switchAmmo: null,
+  cycleAmmo: false,
       skill: null,
       mouseX: 0,
       mouseY: 0,
@@ -559,8 +545,7 @@ export class NpcController {
       turretDir: this.aimTurn(this.target),
       barrelDir: this.aimBarrel(this.target),
       fire: this.decideFire(),
-      switchNext: false,
-      switchAmmo: null,
+  cycleAmmo: false,
       skill: null,
       mouseX: 0,
       mouseY: 0,
@@ -579,9 +564,9 @@ export class NpcController {
     const arrived = this.driveToward(dest, CONFIG.ammo.resupplyRadius * 0.7);
     if (arrived) {
       this.lastTurn = 0; // 到达:停下装填
-      return { forward: 0, turn: 0, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
+      return { forward: 0, turn: 0, turretDir: 0, barrelDir: 0, fire: false, cycleAmmo: false, skill: null, mouseX: 0, mouseY: 0 };
     }
-    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: 0, barrelDir: 0, fire: false, switchNext: false, switchAmmo: null, skill: null, mouseX: 0, mouseY: 0 };
+    return { forward: this.avoiding ? 0.4 : 1, turn: this.lastTurn, turretDir: 0, barrelDir: 0, fire: false, cycleAmmo: false, skill: null, mouseX: 0, mouseY: 0 };
   }
 
   // ============================================================
@@ -710,6 +695,8 @@ export class NpcController {
     const g = Math.abs(CONFIG.physics.gravity.y);
     const range = this.tank.driveConfig.barrel.pitchRange;
     if (d < 1) return 0; // 太近:水平直射,无需补偿
+    // 防护:g=0(无重力)或 v=0(无初速)时除零产生 NaN,水平直射
+    if (g < 1e-6 || v < 1e-6) return 0;
     const A = (g * d * d) / (2 * v * v);
     const disc = d * d - 4 * A * (dy + A);
     const u = disc < 0 ? Math.tan(range.max) : (d - Math.sqrt(disc)) / (2 * A);
@@ -752,7 +739,10 @@ export class NpcController {
     const sp = this.tank.body.translation();
     const tp = target.body.translation();
     const dist = Math.hypot(tp.x - sp.x, tp.z - sp.z);
-    const t = dist / CONFIG.weapon.ammoTypes[this.weapon.getSelectedAmmo()].muzzleVelocity;
+    const muzzleV = CONFIG.weapon.ammoTypes[this.weapon.getSelectedAmmo()].muzzleVelocity;
+    // 防护:muzzleVelocity=0 时不预测(避免 t=Infinity → 预测位置 NaN)
+    if (muzzleV < 1e-6) return { x: tp.x, y: tp.y, z: tp.z };
+    const t = dist / muzzleV;
     const vel = target.body.linvel();
     return { x: tp.x + vel.x * t, y: tp.y, z: tp.z + vel.z * t };
   }
@@ -760,7 +750,7 @@ export class NpcController {
   /** 车身偏航(从刚体四元数) */
   private get bodyYaw(): number {
     const q = this.tank.body.rotation();
-    return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+    return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
   }
 
   // ============================================================
@@ -807,10 +797,10 @@ export class NpcController {
   private rayClear(origin: { x: number; y: number; z: number }, yaw: number, maxDist: number): boolean {
     const dir = { x: Math.sin(yaw), y: 0, z: Math.cos(yaw) }; // 0=+z 单位向量(水平)
     const ray = new RAPIER.Ray(origin, dir);
-    // castRay 返回命中 toi(沿 dir 距离,dir 单位故=实际距离);null=未命中=通畅
-    const toi = this.physics.world.castRay(
-      ray, maxDist, true, undefined, undefined, undefined, this.tank.body,
+    // 排除 sensor collider(坦克部位 sensor 不挡物理但会被 raycast 命中,导致不必要避障)
+    const hit = this.physics.world.castRay(
+      ray, maxDist, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, undefined, undefined, this.tank.body,
     );
-    return toi === null;
+    return hit === null;
   }
 }

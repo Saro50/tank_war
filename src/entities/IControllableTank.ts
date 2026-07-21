@@ -2,7 +2,7 @@ import type RAPIER from '@dimforge/rapier3d-compat';
 import type { Group, Object3D } from 'three';
 import type { Fragment } from './Destructible';
 import type { TankStatus, TankPart } from './TankStatus';
-import type { NpcTier } from '../config';
+import type { NpcTier, Team } from '../config';
 
 /**
  * 可驾驶坦克的运行参数
@@ -83,6 +83,12 @@ export interface IControllableTank {
    */
   readonly tier?: NpcTier;
 
+  /**
+   * 阵营(构造注入,所有坦克必有)。
+   * 迷雾系统据此判定显隐:只隐藏 team==='enemy',中立靶子(neutral)始终可见。
+   */
+  readonly team: Team;
+
   state: 'intact' | 'destroyed';
 
   /** 当前运行参数（手感、履带尺寸、相机偏移等） */
@@ -98,6 +104,9 @@ export interface IControllableTank {
 
   /** 当前血量（调试用） */
   getHp(): number;
+
+  /** 最大血量(=初始血量)。姿态评估等需按车型自身 maxHp 算比例,而非硬编码 CONFIG */
+  getMaxHp(): number;
 
   /**
    * 回血(M3 维修技能用,与 takeHit 扣血反向)。

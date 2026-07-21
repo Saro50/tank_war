@@ -18,6 +18,16 @@ export type AmmoType = 'ap' | 'he';
 export type NpcTier = 'rookie' | 'regular' | 'veteran';
 
 /**
+ * 坦克阵营(迷雾/导演共用)。
+ * ------------------------------------------------------------
+ * 运行时挂在 IControllableTank.team 上(构造注入),供:
+ *  - FogOfWarSystem:只对 team==='enemy' 的坦克做迷雾显隐(中立靶子始终可见)
+ *  - DirectorSystem:按 team 过滤敌方候选(现有 teams 数组后续可改读实体字段)
+ * 定义在 config 共享层,避免 entities→systems 循环依赖。
+ */
+export type Team = 'player' | 'enemy' | 'neutral';
+
+/**
  * 全局参数集中地
  * ============================================================
  * 所有可调的物理 / 游戏参数集中在此，原因：
@@ -39,6 +49,35 @@ export const CONFIG = {
   ground: {
     /** 地面厚板半边长(400×400，地图扩大一倍后的面积) */
     halfSize: { x: 200, y: 0.5, z: 200 },
+    /** 贴图(草地:颜色 + 法线)。图缺失时回退纯色,不阻塞游戏。
+     *  要求:无缝平铺(seamless),1024×1024,放 public/textures/。
+     *  法线 OpenGL 格式(绿向上,three.js 默认)。 */
+    texture: {
+      /** 颜色贴图路径(相对 public/) */
+      color: 'textures/ground_grass.png',
+      /** 法线贴图路径(相对 public/) */
+      normal: 'textures/ground_grass_normal.png',
+      /** 平铺密度:repeat 次数 = 地面边长 / 每块覆盖米数。
+       *  100 = 400m 地面每 4m 铺一块。越大越细密(纹素小),越小越拉伸糊。 */
+      repeat: 100,
+      /** 法线强度(凹凸感):0=完全平面,1=强凹凸。草地建议 0.6~1.0 */
+      normalScale: 0.8,
+    },
+    /** 地形起伏(heightmap 驱动)。微起伏方案:坦克不改(锁 pitch/roll),
+     *  物理引擎让坦克自然跟随地形 Y 升降,姿态保持水平。
+     *  heightmap 缺失时全 0 高度 = 完全平面(当前行为),不阻塞。 */
+    terrain: {
+      /** heightmap 路径(相对 public/)。灰度 PNG:黑=低、白=高。
+       *  要求:灰阶平滑过渡(无陡变/噪点),起伏落差 1.5~2m 内,缓坡为主。 */
+      heightmap: 'textures/terrain_heightmap.png',
+      /** 起伏幅度(米):heightmap 灰度(0~1) × 此值 = 实际高度。
+       *  微起伏建议 1.5~2,需与美术 heightmap 落差匹配。坡度<5° 视觉舒适。 */
+      amplitude: 2,
+      /** mesh 分段数(每边顶点数):决定地形细腻度。
+       *  heightmap 可 1024 但 mesh 128 已够(采样 heightmap)。trimesh 碰撞三角形数 = (seg-1)²×2,
+       *  128 段 ≈ 3.2 万三角形(可接受);过高会拖慢物理碰撞。 */
+      segments: 128,
+    },
   },
 
   /** 主循环：固定步长子步法，保证模拟确定性、抗卡顿 */
@@ -147,14 +186,12 @@ export const CONFIG = {
       maxHp: 60,
       /** HP 低于 maxHp × 此比例 → 开始冒烟(受伤状态视觉反馈),同静态坦克 */
       smokeThreshold: 0.6,
-      /** 击毁大爆炸尺寸缩放(相对普通炮弹爆炸),同静态坦克 destroyExplosionScale */
+      /** 击毁大爆炸尺寸缩放(相对普通炮弹爆炸),同静态坦克 */
       destroyExplosionScale: 4,
-      /** 击毁浓烟尺寸缩放(相对受伤小烟),同静态坦克 destroySmokeScale */
+      /** 击毁浓烟尺寸缩放(相对受伤小烟),同静态坦克 */
       destroySmokeScale: 1.6,
-      /** 脱战回血:最后一次受击后多少秒开始回血(1VN 续战力,躲掩体脱战可恢复) */
-      regenDelay: 8,
-      /** 回血速率(HP/秒),regenDelay 到期后每秒回血量 */
-      regenRate: 5,
+      /** 回血途径已移至补给点(驶入补给点自动维修),不再脱战自动回血。
+       *  原 regenDelay/regenRate 删除;TankBase.update 中条件判断自动短路。 */
     },
   },
 
@@ -244,16 +281,18 @@ export const CONFIG = {
     },
   },
 
-  /** 弹药补给(M5:炮弹总量限制 + 资源点装填)
-   * ------------------------------------------------------------
-    * 所有坦克统一:开火消耗弹药,归零禁射;驶入补给点半径内自动持续装填。
-    * 逼玩家管理弹药、回补给点,打破"无限倾泻"的单调节奏。
-    * 弹药种类增强后:AP/HE 各自独立库存,补给点同时补两种(各自到顶)。 */
+  /** 弹药补给(M5:炮弹总量限制 + 资源点装填) + 弹药种类
+    * ------------------------------------------------------------
+     * 所有坦克统一:开火消耗弹药,归零禁射;驶入补给点半径内自动持续装填 HE + 回血。
+     * AP 弹为有限资源:初始 5 发,打完不可获得(补给点不补 AP)。
+     * Tab 循环切换弹药类型(可扩展架构:新增弹种只在序列加图标,不增键位)。 */
   ammo: {
-    /** 各弹种上限(玩家/NPC 统一)。AP 18 + HE 12,够一场交战但有上限,鼓励按需选弹。 */
-    maxByType: { ap: 18, he: 12 },
-    /** 各弹种装填速率(发/秒,同时补)。不能瞬补(防战斗中滥用)。 */
-    resupplyRate: { ap: 5, he: 4 },
+    /** 各弹种上限(玩家/NPC 统一)。
+     *  AP=5(有限资源,初始即满,打完不可得);HE=12(常规弹药,补给点持续补充)。 */
+    maxByType: { ap: 5, he: 12 },
+    /** 各弹种装填速率(发/秒)。AP=0:补给点不补 AP(有限资源设计)。
+     *  HE=4:驶入补给点后每秒回 4 发 HE。 */
+    resupplyRate: { ap: 0, he: 4 },
     /** 补给点装填半径(m):坦克驶入此半径即开始装填。 */
     resupplyRadius: 5,
     /** NPC 当前选弹≤此值时主动前往补给点(留余量防路上无还手之力)。 */
@@ -273,34 +312,30 @@ export const CONFIG = {
       track: { scale: 0.5, duration: 8 },
     },
 
-    /** 主动技能(M3):玩家始终拥有;veteran NPC 也拥有(rookie/regular 无,平衡性)。
+    /** 主动技能:玩家按 Shift+数字组合激活(⇧1 过载 / ⇧2 装甲 / ⇧~ 侦查);
+     *  veteran NPC 也拥有(rookie/regular 无,平衡性)。
      *  激活时给 tank.status 注入对应 effect(M0 状态层统一聚合)。
-     *  三个技能覆盖 续航/机动/防御 三维,玩家须选此刻最缺的——这才是"选择"。 */
+     *  维修功能已移至补给点(驶入自动回血),不再作为技能。 */
     skills: {
-      /** 应急维修:站桩 3s 回 30HP。战斗中乱用=送死(站桩期间被集火),残血脱战翻盘用。
-       *  施法期间速度超 castMaxSpeed 则中断(防移动滥用,已回血保留)。 */
-      repair: {
-        cooldown: 20,
-        duration: 3,
-        healTotal: 30,
-        /** 施法最大速度(m/s):超此视为移动中断维修 */
-        castMaxSpeed: 1.5,
-      },
-      /** 引擎过载:4s 内机动 ×1.5/×1.3。冲锋/抢点/逃命。 */
+      /** 引擎过载(⇧1):4s 内机动 ×1.5/×1.3。冲锋/抢点/逃命。 */
       boost: { cooldown: 15, duration: 4, moveScale: 1.5, turnScale: 1.3 },
-      /** 装甲倾斜:5s 内受击伤害 ×0.6(damageReduction)。顶上去硬换的关键窗口。 */
+      /** 装甲倾斜(⇧2):5s 内受击伤害 ×0.6(damageReduction)。顶上去硬换的关键窗口。 */
       armor: { cooldown: 18, duration: 5, damageReduction: 0.6 },
+      /** 侦查(⇧~):8s 内视野半径 ×1.5(sightScale)。短暂扩大战场感知,发现远距敌方。
+       *  FogOfWarSystem 读 tank.status.sightScale 临时增大视野圆半径。 */
+      scout: { cooldown: 20, duration: 8, sightScale: 1.5 },
     },
 
-    /** veteran NPC 技能决策参数(M3):rookie/regular 不持有技能,仅 veteran 按 these 规则触发。
-     *  NPC 复用玩家 SkillSystem 接口(每辆 NPC 独立实例,独立冷却)。 */
+    /** veteran NPC 技能决策参数:rookie/regular 不持有技能,仅 veteran 按 these 规则触发。
+     *  NPC 复用玩家 SkillSystem 接口(每辆 NPC 独立实例,独立冷却)。
+     *  维修已移至补给点,此处不再有 repairHpRatio;veteran 残血时导航去补给点回血。 */
     npcSkill: {
-      /** 维修触发血量比:HP 低于此且脱战(无视线/远)才修,避免战斗中送死 */
-      repairHpRatio: 0.4,
       /** 装甲倾斜触发血量比:HP 低于此且正交战时硬换 */
       armorHpRatio: 0.6,
       /** 引擎过载触发距离比(相对 fireRange):目标远需逼近冲锋,或残血逃跑 */
       boostDistRatio: 1.2,
+      /** 血量低于此比例时主动导航到最近补给点(回血+补弹);替代原 repair 决策 */
+      retreatHpRatio: 0.35,
     },
 
     /** NPC 难度外观映射(配色 + 军衔标识,让玩家一眼识别敌方难度)。
@@ -340,6 +375,22 @@ export const CONFIG = {
         rankColor: 0xc0392b,
       },
     },
+  },
+
+  /** 战争迷雾(视野系统)
+   * ------------------------------------------------------------
+   * 玩家视野半径内 = 当前可见(清晰);视野外未探索区 = 浓雾盖;曾探索 = 灰显记忆地形。
+   * 敌方坦克(team==='enemy')仅在当前可见时显示(+ LOS 不被遮挡);残骸始终可见。
+   * 详见 FogOfWarSystem。 */
+  fog: {
+    /** 视野半径(m):玩家能看到的距离。缩小(原 60),强化迷雾压迫感 + 鼓励主动侦察。 */
+    sightRadius: 23,
+    /** 视野/显隐更新降频(s):不必每帧算,对齐 perception.scanInterval 省性能。 */
+    scanInterval: 0.2,
+    /** 探索网格格子大小(m):地图 400m / 2m = 200×200 格。小=细腻但更耗。 */
+    cellSize: 2,
+    /** 雾色(灰白偏冷):未探索浓雾的主色。explored 态在此基础上半透。 */
+    fogColor: 0x9aa6a6,
   },
 
   /** 破坏系统（M4） */
@@ -623,10 +674,12 @@ export const CONFIG = {
     npcPatrolRadius: 6,
   },
 
-  /** 补给点(M5:可被摧毁、定时再生的弹药装填点)
-   * ------------------------------------------------------------
-   * 坦克驶入半径内自动装填;可被炮弹/撞击摧毁,摧毁后倒计时原位复活。
-   * 3 点均衡分布(玩家南、NPC 东/西/北 都能就近补给),鼓励机动与争夺。 */
+  /** 补给点(M5:可被摧毁、定时再生的弹药装填 + 维修点)
+    * ------------------------------------------------------------
+    * 坦克驶入半径内自动:① 装填 HE 弹药 ② 回血(维修)。
+    *  可被炮弹/撞击摧毁,摧毁后倒计时原位复活。
+    *  3 点均衡分布(玩家南、NPC 东/西/北 都能就近补给),鼓励机动与争夺。
+    *  回血替代了原脱战自动回血 + 维修技能,补给点成为唯一回血途径。 */
   resupplyPoint: {
     /** 补给站 HP:hitDamage≈35 衰减后约 3 发直击可毁(战略资源,不至太脆也不至于太硬)。 */
     hp: 100,
@@ -634,6 +687,9 @@ export const CONFIG = {
     regenTime: 30,
     /** 中央补给站建筑半尺寸(m,实心 fixed collider)。坦克撞不上需绕行至半径内装填。 */
     stationHalf: { x: 1.0, y: 1.0, z: 1.0 },
+    /** 维修回血速率(HP/秒):坦克驶入补给点半径内每秒回此数值 HP。
+     *  5 HP/s → 60HP 满血需 12s,鼓励驻留但非瞬补。 */
+    repairRate: 5,
     /** 3 个补给点位置(均衡覆盖战场) */
     points: [
       { x: 0, z: 10 }, // 中央:战场核心争夺点

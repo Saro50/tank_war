@@ -18,6 +18,8 @@ export class RenderScene {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
+  /** 平行光(阴影源),dispose 时需释放 shadow map */
+  private sun?: THREE.DirectionalLight;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -66,6 +68,7 @@ export class RenderScene {
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 200;
     this.scene.add(sun);
+    this.sun = sun;
   }
 
   private onResize = (): void => {
@@ -82,6 +85,11 @@ export class RenderScene {
   /** 销毁渲染资源(场景重置/卸载用)：移除 resize 监听、释放场景对象并移除 canvas */
   dispose(): void {
     window.removeEventListener('resize', this.onResize);
+
+    // 释放平行光 shadow map(2048×2048 深度贴图占显存)
+    if (this.sun?.shadow.map) {
+      this.sun.shadow.map.dispose();
+    }
 
     // 释放场景图中所有 Mesh 的几何体、材质和纹理
     const geos = new Set<THREE.BufferGeometry>();

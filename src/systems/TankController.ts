@@ -31,6 +31,8 @@ export class TankController {
   private readonly render: RenderScene;
   private dusts: Dust[] = []; // 非 readonly：updateDust 用 filter 重新赋值
   private distAcc = 0; // 行驶距离累积(按距生成扬尘)
+  /** 可选:获取地面高度(贴地扬尘);未提供时用坦克 Y 近似 */
+  private readonly getGroundHeight?: (x: number, z: number) => number;
 
   // 平滑/积分状态
   private curLin = 0; // 当前沿车身方向线速度
@@ -42,10 +44,11 @@ export class TankController {
   private turretOmega = 0; // 炮塔当前角速度(rad/s, 惯性)
   private barrelPitch = 0; // 炮管俯仰(rad)
 
-  constructor(tank: IControllableTank, render: RenderScene) {
+  constructor(tank: IControllableTank, render: RenderScene, getGroundHeight?: (x: number, z: number) => number) {
     this.tank = tank;
     this.render = render;
     this.camera = render.camera;
+    this.getGroundHeight = getGroundHeight;
     this.reset();
     log.info('controller ready', { tank: tank.name });
   }
@@ -182,7 +185,10 @@ export class TankController {
     const speed = Math.abs(this.curLin);
     if (speed < cfg.minSpeed) return;
     this.distAcc += speed * dt;
-    const gap = 1 / cfg.spawnPerMeter;
+    // boost(引擎过载)激活时扬尘密度加大(全速前进的视觉反馈):
+    // spawnPerMeter ×2.5,配合速度 ×1.5,总扬尘量约 ×3.75,尘土飞扬
+    const spawnPerMeter = this.tank.status.hasEffect('boost') ? cfg.spawnPerMeter * 2.5 : cfg.spawnPerMeter;
+    const gap = 1 / spawnPerMeter;
     if (this.distAcc >= gap) {
       this.distAcc -= gap;
       this.spawnDust();
@@ -196,19 +202,21 @@ export class TankController {
     const yaw = this.bodyYaw;
     const cos = Math.cos(yaw);
     const sin = Math.sin(yaw);
+    // boost 激活时尘雾强度翻倍(粒子数/半径/速度/寿命 全 ×2),尘土暴扬
+    const intensity = this.tank.status.hasEffect('boost') ? 2 : 1;
     for (const side of [-1, 1]) {
       const lx = side * tcfg.offsetX;
       const lz = (Math.random() * 2 - 1) * tcfg.halfZ * 0.8; // 履带长度内随机
       const wx = t.x + lx * cos + lz * sin;
       const wz = t.z - lx * sin + lz * cos;
-      this.dusts.push(new Dust(this.render, { x: wx, y: 0.05, z: wz }));
+      // 扬尘贴地:优先用 terrain.getHeight(起伏地形下不悬浮/不穿地);未注入时用坦克 Y 近似
+      const groundY = this.getGroundHeight ? this.getGroundHeight(wx, wz) : t.y - 0.9;
+      this.dusts.push(new Dust(this.render, { x: wx, y: groundY, z: wz }, intensity));
     }
   }
 
   /**
-   * 第三人称相机：偏移随【炮塔世界偏航】旋转(= 车身 yaw + 炮塔相对角),
-   * 始终在炮塔后方(炮管反方向)看炮管前方——视角跟随炮塔,不跟随车身。
-   * 体验:玩家转炮塔(Q/W)= 转视角;转车身(←/→)时画面不跟随,车归车瞄归瞄。
+   * 等距俯视相机(固定斜 45° 方向跟随坦克,不随炮塔/车身旋转)。
    * 拆为 public:玩家侧 main 显式调用(每帧);AI 侧不调用(不抢玩家相机)。
    * 被击毁也调用——跟随残骸。
    */
@@ -243,7 +251,7 @@ export class TankController {
   /** 车身当前偏航角（从刚体四元数计算） */
   private get bodyYaw(): number {
     const q = this.tank.body.rotation();
-    return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+    return Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
   }
 
   /** 诊断用：当前炮塔角/炮管俯仰(度) */

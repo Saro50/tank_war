@@ -50,6 +50,8 @@ export class WeaponSystem {
 
   private cooldown = 0;
   private prevFire = false;
+  /** Tab 切弹药边沿触发(上一帧 Tab 是否按下) */
+  private prevCycleAmmo = false;
   /** 每辆坦克独立的后坐量，避免切换坦克时串位 */
   private recoilByTank = new Map<number, number>();
   /** 音效钩子(可选:main 创建 SoundSystem 后注入。未注入时静默,不影响游戏) */
@@ -134,8 +136,9 @@ export class WeaponSystem {
   update(input: InputState, dt: number): void {
     const tank = this.getActiveTank();
 
-    // 选弹切换(边沿触发:input.switchAmmo 非空表示本帧按下切换键)
-    if (input.switchAmmo) this.switchAmmo(input.switchAmmo);
+    // Tab 循环切换弹药(边沿触发:本帧按下且上帧未按 → 切一次)
+    if (input.cycleAmmo && !this.prevCycleAmmo) this.cycleAmmo();
+    this.prevCycleAmmo = input.cycleAmmo;
 
     // 冷却 + 边沿触发开火(按一次打一发)。被击毁后无法开火。
     // 弹药检查:当前选弹>=1 才能开火;空仓不触发也不设冷却。
@@ -233,16 +236,23 @@ export class WeaponSystem {
   }
 
   /**
-   * 切换当前活性坦克的弹种。
-   * 切换不消耗、不冷却(鼓励灵活选弹);同弹种再切无效(避免日志刷屏)。
+   * 循环切换当前活性坦克的弹种(Tab 键,可扩展架构)。
+   * ------------------------------------------------------------
+   * 按 AMMO_ORDER 顺序循环:HE → AP → HE...
+   * 切换不消耗、不冷却;新增弹种只需往 AMMO_ORDER 加一项,Tab 自然循环。
    */
-  switchAmmo(type: AmmoType): void {
+  private cycleAmmo(): void {
     const tank = this.getActiveTank();
     const prev = this.selectedOf(tank);
-    if (prev === type) return;
-    this.selectedByTank.set(tank.id, type);
-    log.info('AMMO SWITCH', { tank: tank.displayName, from: prev, to: type });
+    const order = WeaponSystem.AMMO_ORDER;
+    const idx = order.indexOf(prev);
+    const next = order[(idx + 1) % order.length];
+    this.selectedByTank.set(tank.id, next);
+    log.info('AMMO CYCLE', { tank: tank.displayName, from: prev, to: next });
   }
+
+  /** 弹药循环顺序(Tab 按此数组循环)。新增弹种只需往此数组加一项 */
+  private static readonly AMMO_ORDER: AmmoType[] = ['he', 'ap'];
 
   /**
    * 装填补给(由 ResupplySystem 在坦克处于补给点半径内时调用)。
@@ -253,7 +263,8 @@ export class WeaponSystem {
     const stock = this.ammoOf(tank);
     const rate = CONFIG.ammo.resupplyRate;
     let changed = false;
-    if (stock.ap < this.maxByType.ap) {
+    // AP rate=0 时不补(有限资源设计:AP 初始5发,打完不可得)
+    if (rate.ap > 0 && stock.ap < this.maxByType.ap) {
       stock.ap = Math.min(this.maxByType.ap, stock.ap + rate.ap * dt);
       changed = true;
     }
@@ -264,9 +275,8 @@ export class WeaponSystem {
     if (changed) {
       this.ammoByTank.set(tank.id, stock);
       this.resupplyFlash = 0.25;
-      // 音效:补满瞬间(changed && isAmmoFull 精确捕捉"刚补满的那一帧")
-      // 触发玩家语音05;本来满的不 changed 不会误触,半补过程没满也不触发
-      if (stock.ap >= this.maxByType.ap && stock.he >= this.maxByType.he) {
+      // 音效:补满瞬间触发玩家语音05。AP 不可补,只判断 HE 是否满
+      if (stock.he >= this.maxByType.he) {
         this.sound?.onAmmoFilled(tank);
       }
       // 低弹药边沿:补弹后占比回升 → 重置 flag(下次再跌破可再触发)
@@ -274,9 +284,9 @@ export class WeaponSystem {
     }
   }
 
-  /** 取某坦克当前选弹(默认 ap) */
+  /** 取某坦克当前选弹(默认 he;AP 为有限资源,HE 为常规主弹种) */
   private selectedOf(tank: IControllableTank): AmmoType {
-    return this.selectedByTank.get(tank.id) ?? 'ap';
+    return this.selectedByTank.get(tank.id) ?? 'he';
   }
 
   private fire(tank: IControllableTank, type: AmmoType): void {

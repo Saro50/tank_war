@@ -65,6 +65,16 @@ export class AudioEngine {
   private unlocked = false;
   /** ctx 创建是否失败(无 Web Audio 支持) */
   private readonly disabled: boolean;
+  /**
+   * 已警告过"buffer 缺失"的 id 集合(去重防刷屏)。
+   * ------------------------------------------------------------
+   * playOnce(开炮)高频调用,若某音效解码失败每次调用都 warn 会刷屏;
+   * 用此 Set 保证每个 id 只警告一次。playBgm 低频亦同(保险)。
+   * 遵循"永不静默失败":静默 return 仅指不阻塞游戏,但必须留可追溯日志。
+   */
+  private readonly warnedMissing = new Set<SoundId>();
+  /** pending setTimeout id 集合(dispose 时统一清除,防 teardown 后回调访问已关闭 ctx) */
+  private readonly pendingTimeouts = new Set<number>();
 
   constructor() {
     try {
@@ -109,9 +119,10 @@ export class AudioEngine {
     try {
       await this.ctx.resume();
       this.unlocked = true;
-      log.info('audio unlocked');
+      // 带 ctx.state:确认是否真正 running(某些环境下 resume() resolve 但 state 仍 suspended)
+      log.info('audio unlocked', { state: this.ctx.state });
     } catch (e) {
-      log.warn('audio unlock failed, playing silent', { err: String(e) });
+      log.warn('audio unlock failed, playing silent', { err: String(e), state: this.ctx.state });
     }
   }
 
@@ -126,7 +137,15 @@ export class AudioEngine {
   playOnce(id: SoundId, track: AudioTrack, pos?: Vec3, volume = 1): void {
     if (this.disabled) return;
     const buf = this.assets?.get(id);
-    if (!buf) return; // 资源缺失静默跳过(降级)
+    if (!buf) {
+      // 资源缺失静默跳过(降级,不阻塞游戏),但记 warn 一次以便追溯
+      // (开炮等高频调用,去重防刷屏;若 mp3 解码失败这里是定位根因的关键日志)
+      if (!this.warnedMissing.has(id)) {
+        this.warnedMissing.add(id);
+        log.warn('audio buffer missing, playback skipped', { id, track });
+      }
+      return;
+    }
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     const gain = this.ctx.createGain();
@@ -155,7 +174,14 @@ export class AudioEngine {
   startLoop(id: SoundId, track: AudioTrack, pos: Vec3, volume = 1): LoopHandle | undefined {
     if (this.disabled) return undefined;
     const buf = this.assets?.get(id);
-    if (!buf) return undefined;
+    if (!buf) {
+      // 资源缺失:warn 一次(去重),返回 undefined 让上层跳过此源(避免半套循环源泄漏)
+      if (!this.warnedMissing.has(id)) {
+        this.warnedMissing.add(id);
+        log.warn('audio buffer missing, loop skipped', { id, track });
+      }
+      return undefined;
+    }
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.loop = true;
@@ -179,6 +205,7 @@ export class AudioEngine {
         const doStop = (): void => {
           if (stopped) return;
           stopped = true;
+          this.pendingTimeouts.delete(id);
           try {
             src.stop(this.ctx.currentTime + 0.02);
             src.disconnect();
@@ -190,7 +217,8 @@ export class AudioEngine {
           }
         };
         // 用 timeout 触发清理(Web Audio 无 stop 后回调的可靠方式)
-        window.setTimeout(doStop, (fadeSec + 0.1) * 1000);
+        const id = window.setTimeout(doStop, (fadeSec + 0.1) * 1000);
+        this.pendingTimeouts.add(id);
       },
       setVolume: (vol, fadeSec): void => {
         const t = this.ctx.currentTime;
@@ -264,7 +292,15 @@ export class AudioEngine {
   playBgm(id: SoundId, fadeSec = 0.5): void {
     if (this.disabled) return;
     const buf = this.assets?.get(id);
-    if (!buf) return; // 资源缺失静默跳过
+    if (!buf) {
+      // BGM 资源缺失:warn 一次(去重)。这是"BGM 不响"最常见的根因日志,
+      // 用户据此可判断是 mp3 解码失败还是路径错误。
+      if (!this.warnedMissing.has(id)) {
+        this.warnedMissing.add(id);
+        log.warn('bgm buffer missing, playback skipped', { id });
+      }
+      return;
+    }
     // 先停当前(淡出):交叉淡变效果——旧曲淡出同时新曲淡入
     if (this.bgmSource) this.stopBgm(fadeSec);
     const src = this.ctx.createBufferSource();
@@ -295,6 +331,7 @@ export class AudioEngine {
     const doStop = (): void => {
       if (stopped) return;
       stopped = true;
+      this.pendingTimeouts.delete(id);
       try {
         src.stop();
         src.disconnect();
@@ -303,7 +340,8 @@ export class AudioEngine {
         /* 已停止,忽略 */
       }
     };
-    window.setTimeout(doStop, (fadeSec + 0.1) * 1000);
+    const id = window.setTimeout(doStop, (fadeSec + 0.1) * 1000);
+    this.pendingTimeouts.add(id);
     // 立即清引用(playBgm 可紧接着开播新曲,旧的在 timeout 后自行停止)
     this.bgmSource = undefined;
     this.bgmVolGain = undefined;
@@ -360,6 +398,20 @@ export class AudioEngine {
    *  资源是否齐全,缺失则禁用引擎音避免每帧无效创建 source(性能黑洞)。 */
   hasAsset(id: SoundId): boolean {
     return this.assets?.has(id) ?? false;
+  }
+
+  /** 销毁:停 BGM + 清除 pending timeout + 关闭 ctx(HMR/卸载时调用,防资源泄漏) */
+  dispose(): void {
+    if (this.disabled) return;
+    this.stopBgm(0);
+    for (const id of this.pendingTimeouts) clearTimeout(id);
+    this.pendingTimeouts.clear();
+    try {
+      void this.ctx.close();
+    } catch {
+      /* ctx 已关闭 */
+    }
+    log.info('audio engine disposed');
   }
 
   // assets 引用(bindAssets 注入)

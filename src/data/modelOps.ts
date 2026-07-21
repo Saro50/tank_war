@@ -154,14 +154,12 @@ export function resolveTankModel(raw: TankModel): ResolvedTankModel {
 
   // damage 缺省:tank 与 staticTank 顶层同值(0.6/4/1.6),统一用 staticTank 顶层(语义更通用)
   const sd = CONFIG.staticTank;
-  const td = CONFIG.tank.damage;
   const damage = {
     smokeThreshold: raw.damage?.smokeThreshold ?? sd.smokeThreshold,
     destroyExplosionScale: raw.damage?.destroyExplosionScale ?? sd.destroyExplosionScale,
     destroySmokeScale: raw.damage?.destroySmokeScale ?? sd.destroySmokeScale,
     smokeOffset: raw.damage?.smokeOffset ?? { x: 0, y: 1.0, z: 0 },
-    regenDelay: raw.damage?.regenDelay ?? td.regenDelay,
-    regenRate: raw.damage?.regenRate ?? td.regenRate,
+    // 回血已移至补给点,不再需要脱战回血配置
   };
 
   const drive = raw.drive ?? extractDriveFromTankConfig();

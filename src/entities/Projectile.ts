@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { Mesh, MeshStandardMaterial, SphereGeometry } from 'three';
+import { BufferGeometry, ConeGeometry, Mesh, MeshStandardMaterial, SphereGeometry } from 'three';
 import { CONFIG, type AmmoType } from '../config';
 import type { PhysicsWorld } from '../core/PhysicsWorld';
 import type { RenderScene } from '../core/RenderScene';
@@ -18,8 +18,12 @@ import { SyncBridge } from '../core/SyncBridge';
  * 命中/超时由 WeaponSystem 调用 dispose 清理。
  */
 // 几何/材质按弹种缓存(模块级共享,所有炮弹复用,dispose 不释放)
-const geoByType: Record<AmmoType, SphereGeometry> = {
-  ap: new SphereGeometry(CONFIG.weapon.ammoTypes.ap.radius, 16, 12),
+// AP=尖头锥形(穿甲感), HE=圆球(高爆感);视觉上一眼区分来袭弹种
+const geoByType: Record<AmmoType, BufferGeometry> = {
+  // AP 穿甲弹:圆锥形(尖端朝飞行方向 +z),长度=半径×3 模拟尖头弹体
+  ap: new ConeGeometry(CONFIG.weapon.ammoTypes.ap.radius, CONFIG.weapon.ammoTypes.ap.radius * 3, 10)
+    .rotateX(Math.PI / 2), // 默认尖端朝 +y,旋转后朝 +z(飞行方向)
+  // HE 高爆弹:圆球(钝头,与 AP 视觉区分)
   he: new SphereGeometry(CONFIG.weapon.ammoTypes.he.radius, 16, 12),
 };
 const matByType: Record<AmmoType, MeshStandardMaterial> = {

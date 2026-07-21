@@ -61,8 +61,9 @@ export class CaptureZone {
   /** 共享单位圆几何(所有占领点共用;首版仅一个实例,仍按 ResupplyPoint 规范 static 化) */
   private static readonly diskGeo = new CircleGeometry(1, 48);
 
-  constructor(render: RenderScene, pos: { x: number; z: number }) {
+  constructor(render: RenderScene, pos: { x: number; y?: number; z: number }) {
     const cfg = CONFIG.capturePoint;
+    const groundY = pos.y ?? 0; // 地形高度(贴地;不传=0 兼容平面)
     this.position = { x: pos.x, z: pos.z };
     this.radius = cfg.radius;
 
@@ -78,7 +79,7 @@ export class CaptureZone {
     });
     this.disk = new Mesh(CaptureZone.diskGeo, this.diskMat);
     this.disk.rotation.x = -Math.PI / 2; // 平铺地面
-    this.disk.position.set(pos.x, 0.05, pos.z); // 略离地面防 z-fighting
+    this.disk.position.set(pos.x, groundY + 0.05, pos.z); // 略离地面防 z-fighting
     this.disk.scale.setScalar(cfg.radius);
     render.scene.add(this.disk);
 
@@ -93,13 +94,13 @@ export class CaptureZone {
       depthWrite: false, // 不写深度,避免半透明光柱遮挡其后场景的渲染排序问题
     });
     this.beam = new Mesh(new CylinderGeometry(1.2, 1.6, 28, 16, 1, true), this.beamMat);
-    this.beam.position.set(pos.x, 14, pos.z); // 柱高 28m,中心抬高 14m
+    this.beam.position.set(pos.x, groundY + 14, pos.z); // 柱高 28m,中心抬高 14m
     render.scene.add(this.beam);
 
     // —— 玩家进度环(外圈,蓝):SEGMENTS 段围成圆 ——
-    this.playerSegments = this.buildRing(render, cfg.radius * 1.02, 0x4a8aff);
+    this.playerSegments = this.buildRing(render, cfg.radius * 1.02, 0x4a8aff, groundY);
     // —— 敌方进度环(内圈,红):SEGMENTS 段围成圆 ——
-    this.enemySegments = this.buildRing(render, cfg.radius * 0.88, 0xff4a4a);
+    this.enemySegments = this.buildRing(render, cfg.radius * 0.88, 0xff4a4a, groundY);
 
     log.info('capture zone built', { at: `${pos.x},${pos.z}`, radius: cfg.radius });
   }
@@ -109,7 +110,7 @@ export class CaptureZone {
    * 每段初始 visible=false(进度为 0);由 updateVisual 按进度显隐。
    * 段沿圆周切线方向放置(绕 Y 旋转 angle,Z 轴对齐切线)。
    */
-  private buildRing(render: RenderScene, r: number, color: number): Mesh[] {
+  private buildRing(render: RenderScene, r: number, color: number, groundY: number): Mesh[] {
     const segs: Mesh[] = [];
     const mat = new MeshStandardMaterial({
       color,
@@ -122,7 +123,7 @@ export class CaptureZone {
       const angle = (i / SEGMENTS) * Math.PI * 2;
       const m = new Mesh(CaptureZone.segGeo, mat);
       // 圆周位置:y=0.25 让段半埋地面、半凸起,视觉上像"地面镶的灯带"
-      m.position.set(this.position.x + Math.sin(angle) * r, 0.25, this.position.z + Math.cos(angle) * r);
+      m.position.set(this.position.x + Math.sin(angle) * r, groundY + 0.25, this.position.z + Math.cos(angle) * r);
       m.rotation.y = angle; // X 轴(段长边 0.9)对齐圆周切线方向 → 段沿环排列
       m.visible = false; // 初始进度 0:全隐藏
       render.scene.add(m);

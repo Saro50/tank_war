@@ -726,8 +726,7 @@ export interface ResolvedDamage {
   destroyExplosionScale: number;
   destroySmokeScale: number;
   smokeOffset: { x: number; y: number; z: number };
-  regenDelay: number;
-  regenRate: number;
+  // regenDelay/regenRate 已移除:回血移至补给点,不再需要脱战回血配置
 }
 /** resolve 后的 TankModel(全字段填充,游戏就绪)。加载层 resolveTankModel 产出此类型,
  *  保证游戏实体读取时永不缺值(防御:不因 JSON 缺字段崩溃)。 */

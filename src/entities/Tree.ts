@@ -34,6 +34,15 @@ function ensureShared(): void {
  */
 export class Tree {
   state: 'intact' | 'fallen' = 'intact';
+
+  /** 迷雾显隐:供 FogOfWarSystem 按视野格子切 visible */
+  setVisibility(v: boolean): void {
+    this.group.visible = v;
+  }
+
+  /** 位置(供迷雾判定格子;body 是 private,通过 getter 暴露) */
+  get fogX(): number { return this.body.translation().x; }
+  get fogZ(): number { return this.body.translation().z; }
   /** collider handle，供 DestructionSystem 碰撞反查 */
   readonly colliderHandle: number;
   private readonly body: RAPIER.RigidBody;

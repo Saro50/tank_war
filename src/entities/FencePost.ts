@@ -29,6 +29,15 @@ function ensureShared(): void {
  */
 export class FencePost {
   state: 'intact' | 'knocked' = 'intact';
+
+  /** 迷雾显隐:供 FogOfWarSystem 按视野格子切 visible */
+  setVisibility(v: boolean): void {
+    this.group.visible = v;
+  }
+
+  /** 位置(供迷雾判定格子;body 是 private,通过 getter 暴露) */
+  get fogX(): number { return this.body.translation().x; }
+  get fogZ(): number { return this.body.translation().z; }
   readonly colliderHandle: number;
   private readonly body: RAPIER.RigidBody;
   private readonly group: Group;

@@ -35,6 +35,11 @@ export interface TimedEffect {
   turretScale?: number;
   /** 受击伤害系数(乘到最终伤害,0.6=减伤40%)。缺省=1 */
   damageReduction?: number;
+  /**
+   * 视野半径系数(乘到 sightRadius,1.5=视野扩大50%)。缺省=1。
+   * 侦查技能(⇧~)注入,FogOfWarSystem 读取以临时扩大视野范围。
+   */
+  sightScale?: number;
 }
 
 /**
@@ -117,7 +122,19 @@ export class TankStatus {
     return s;
   }
 
-  /** 调试用:当前激活效果摘要,如 "track-dmg:move×0.15,turn×0.15(8.2s);boost:move×1.5(3.1s)" */
+  /** 视野半径系数(侦查技能用;多个源乘法叠加,无 effect=1.0) */
+  get sightScale(): number {
+    let s = 1;
+    for (const e of this.effects) if (e.sightScale !== undefined) s *= e.sightScale;
+    return s;
+  }
+
+  /** 某效果是否正在生效(视觉层查询用:技能特效显隐) */
+  hasEffect(id: string): boolean {
+    return this.effects.some((e) => e.id === id);
+  }
+
+  /** 谋试用:当前激活效果摘要,如 "track-dmg:move×0.15,turn×0.15(8.2s);boost:move×1.5(3.1s)" */
   get debugSummary(): string {
     if (this.effects.length === 0) return '';
     return this.effects
@@ -127,6 +144,7 @@ export class TankStatus {
         if (e.turnScale !== undefined) parts.push(`turn×${e.turnScale}`);
         if (e.turretScale !== undefined) parts.push(`turret×${e.turretScale}`);
         if (e.damageReduction !== undefined) parts.push(`dmg×${e.damageReduction}`);
+        if (e.sightScale !== undefined) parts.push(`sight×${e.sightScale}`);
         parts.push(`(${e.remaining.toFixed(1)}s)`);
         return `${e.id}:${parts.join(',')}`;
       })

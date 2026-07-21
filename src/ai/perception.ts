@@ -67,5 +67,9 @@ export function hasLineOfSight(
   //  = target 前缘(不挡自己)= 通畅;命中其他 = 中间障碍 = 被挡。精确无容差。
   const hit = physics.world.castRay(ray, hDist, true, undefined, undefined, undefined, observer.body);
   if (hit === null) return true; // 未命中任何 collider(到 maxToi 无障碍) = 通畅
-  return hit.collider.handle === target.colliderHandle; // 命中 target 自己=通畅,否则被挡
+  // 命中目标方的任一 collider(主 collider 或部位 sensor)都算通畅,不视为遮挡。
+  // 修复:目标有炮塔/履带 sensor collider,setSensor(true) 不挡物理但会被 raycast 命中,
+  //       若只比主 collider handle 会误判 sensor 命中为遮挡 → NPC 错误认为"看不见目标"。
+  if (hit.collider.handle === target.colliderHandle) return true;
+  return target.partColliders.some((pc) => pc.handle === hit.collider.handle);
 }

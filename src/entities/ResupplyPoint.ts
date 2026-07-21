@@ -58,19 +58,20 @@ export class ResupplyPoint implements Damageable {
   constructor(
     physics: PhysicsWorld,
     render: RenderScene,
-    pos: { x: number; z: number },
+    pos: { x: number; y?: number; z: number },
   ) {
     this.physics = physics;
     this.render = render;
     const cfg = CONFIG.resupplyPoint;
-    this.center = { x: pos.x, y: 0, z: pos.z };
+    const groundY = pos.y ?? 0; // 地形高度(贴地;不传=0 兼容平面)
+    this.center = { x: pos.x, y: groundY, z: pos.z };
     this.maxHp = cfg.hp;
     this.hp = cfg.hp;
 
     // —— 中央补给站(fixed 实心 collider) ——
     const sh = cfg.stationHalf;
     this.body = physics.world.createRigidBody(
-      RAPIER.RigidBodyDesc.fixed().setTranslation(pos.x, sh.y, pos.z),
+      RAPIER.RigidBodyDesc.fixed().setTranslation(pos.x, groundY + sh.y, pos.z),
     );
     const col = physics.world.createCollider(
       RAPIER.ColliderDesc.cuboid(sh.x, sh.y, sh.z)
@@ -94,7 +95,7 @@ export class ResupplyPoint implements Damageable {
     });
     this.disk = new Mesh(ResupplyPoint.diskGeo, this.diskMat);
     this.disk.rotation.x = -Math.PI / 2; // 平铺地面
-    this.disk.position.set(pos.x, 0.06, pos.z); // 略离地面防 z-fighting
+    this.disk.position.set(pos.x, groundY + 0.06, pos.z); // 略离地面防 z-fighting
     this.disk.scale.setScalar(CONFIG.ammo.resupplyRadius);
     render.scene.add(this.disk);
 
@@ -106,7 +107,7 @@ export class ResupplyPoint implements Damageable {
       metalness: 0.1,
     });
     this.station = new Mesh(stationGeo, stationMat);
-    this.station.position.set(pos.x, sh.y, pos.z);
+    this.station.position.set(pos.x, groundY + sh.y, pos.z);
     this.station.castShadow = true;
     this.station.receiveShadow = true;
     render.scene.add(this.station);
@@ -114,7 +115,7 @@ export class ResupplyPoint implements Damageable {
     // —— 顶部旋转标识(发光细环,缓慢自转引导"这里是补给点") ——
     // 用 Group 包裹:绕 Group 的 y 轴旋转,轴明确无欧拉顺序歧义。
     this.markerGroup = new Group();
-    this.markerGroup.position.set(pos.x, sh.y * 2 + 0.6, pos.z);
+    this.markerGroup.position.set(pos.x, groundY + sh.y * 2 + 0.6, pos.z);
     const markerGeo = new TorusGeometry(sh.x * 1.4, 0.06, 8, 32);
     const markerMat = new MeshStandardMaterial({
       color: 0xffe066,

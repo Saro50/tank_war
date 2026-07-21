@@ -44,14 +44,14 @@ export type VoiceId =
  * (历史命名:sounds/voice/ 是人声语音,与"voice=人声"语义一致)
  */
 const FIXED_PATHS: Partial<Record<SoundId, string>> = {
-  cannon_fire: 'sounds/tank/tank_cannon_fire.wav',
-  engine_idle: 'sounds/tank/tank_engine_idle_loop.wav',
-  engine_full: 'sounds/tank/tank_engine_full_speed_loop.wav',
-  driving_low: 'sounds/tank/tank_driving_low_speed_loop.wav',
-  driving_high: 'sounds/tank/tank_driving_high_speed_loop.wav',
-  tank_destroy: 'sounds/tank/tank_destory.wav', // 文件名沿用美术命名(destory)
-  bgm_loading: 'sounds/bgm/loading_bgn.wav',
-  bgm_in_game: 'sounds/bgm/in_game.wav',
+  cannon_fire: 'sounds/tank/tank_cannon_fire.mp3',
+  engine_idle: 'sounds/tank/tank_engine_idle_loop.mp3',
+  engine_full: 'sounds/tank/tank_engine_full_speed_loop.mp3',
+  driving_low: 'sounds/tank/tank_driving_low_speed_loop.mp3',
+  driving_high: 'sounds/tank/tank_driving_high_speed_loop.mp3',
+  tank_destroy: 'sounds/tank/tank_destory.mp3', // 文件名沿用美术命名(destory)
+  bgm_loading: 'sounds/bgm/loading_bgn.mp3',
+  bgm_in_game: 'sounds/bgm/in_game.mp3',
 };
 
 /**
@@ -108,7 +108,7 @@ export class AudioAssets {
     // 2. 人声语音(按 lang 选文件;low_ammo 编号 per-lang)
     for (const v of VOICE_FILES) {
       const file = useEn ? v.en : v.zh;
-      await this.loadOne(ctx, v.id, `sounds/voice/${file}.wav`);
+      await this.loadOne(ctx, v.id, `sounds/voice/${file}.mp3`);
       onItem?.();
     }
 

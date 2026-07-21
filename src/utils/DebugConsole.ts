@@ -70,7 +70,7 @@ export class DebugConsole {
     } else if (player) {
       const p = player.body.translation();
       const q = player.body.rotation();
-      const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+      const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
       x = p.x + Math.sin(yaw) * 30;
       z = p.z + Math.cos(yaw) * 30;
     }

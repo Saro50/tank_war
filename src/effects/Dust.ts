@@ -26,16 +26,27 @@ export class Dust {
   private readonly maxLife: number;
   private life = 0;
 
-  constructor(render: RenderScene, pos: { x: number; y: number; z: number }) {
+  constructor(
+    render: RenderScene,
+    pos: { x: number; y: number; z: number },
+    /**
+     * 强度倍率(boost 过载时 >1)。影响:粒子数 × intensity / 半径 × / 速度 × / 寿命 ×。
+     * 默认 1(正常行驶);boost 时传 2(每团尘雾翻倍浓密+大+快+久)。
+     */
+    intensity = 1,
+  ) {
     const cfg = CONFIG.tank.dust;
-    this.maxLife = cfg.lifetime;
+    this.maxLife = cfg.lifetime * intensity;
 
     this.group = new Group();
     this.group.position.set(pos.x, pos.y, pos.z);
 
     const base = new Color(cfg.color);
-    for (let i = 0; i < cfg.particles; i++) {
-      const sp = cfg.speed * (0.3 + Math.random() * 0.7);
+    const count = Math.round(cfg.particles * intensity);
+    const speedMul = intensity;
+    const radiusMul = intensity;
+    for (let i = 0; i < count; i++) {
+      const sp = cfg.speed * speedMul * (0.3 + Math.random() * 0.7);
       const theta = Math.random() * Math.PI * 2;
       // 上半球(接地尘雾主要向上扩散)：phi ∈ [0, π/2]
       const phi = Math.acos(Math.random());
@@ -48,7 +59,7 @@ export class Dust {
       cc.offsetHSL(0, 0, (Math.random() - 0.5) * 0.1);
       const mat = new MeshBasicMaterial({ color: cc, transparent: true, opacity: 0.55 });
       const m = new Mesh(partGeo, mat);
-      const s0 = cfg.particleRadius * (0.7 + Math.random() * 0.8);
+      const s0 = cfg.particleRadius * radiusMul * (0.7 + Math.random() * 0.8);
       m.scale.setScalar(s0);
       this.group.add(m);
       this.particles.push({ mesh: m, mat, vx, vy, vz, s0 });

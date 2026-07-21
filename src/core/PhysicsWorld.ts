@@ -64,4 +64,10 @@ export class PhysicsWorld {
   step(): void {
     this.world.step(this.eventQueue);
   }
+
+  /** 释放 wasm 堆内存(HMR/场景重置时调用,防泄漏) */
+  dispose(): void {
+    this.world.free();
+    log.info('physics world disposed');
+  }
 }

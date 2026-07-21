@@ -123,8 +123,8 @@ export class DestructionSystem {
    * 不走 applyDamage 撞击破坏,否则巡逻靠近的坦克会互相误伤)。
    */
   private readonly tankBodySet = new Set<RAPIER.RigidBody>();
-  /** 撞击冷却(秒)：连续碰撞不重复扣血，避免一帧多次 applyDamage */
-  private ramCooldown = 0;
+  /** 撞击冷却(秒)：按坦克隔离,避免多坦克同时撞击时一帧只处理第一个(全局共享会丢事件) */
+  private ramCooldowns = new Map<IControllableTank, number>();
   /** 音效钩子(可选:main 创建 SoundSystem 后注入。命中敌坦时触发语音04) */
   private sound?: SoundHooks;
 
@@ -137,6 +137,28 @@ export class DestructionSystem {
   /** 注入音效钩子(命中敌坦时触发玩家语音04) */
   setSoundHooks(s: SoundHooks): void {
     this.sound = s;
+  }
+
+  /**
+   * 暴露地物(供 FogOfWarSystem 按视野切显隐)。
+   * 每项含 setVisibility 回调 + 世界位置 + 是否完好(完好才由迷雾管;被破坏的交给破坏逻辑)。
+   */
+  getFogObstacles(): Array<{ setVisibility(v: boolean): void; x: number; z: number; intact: boolean }> {
+    const out: Array<{ setVisibility(v: boolean): void; x: number; z: number; intact: boolean }> = [];
+    for (const d of this.destructibles) {
+      const p = d.body.translation();
+      out.push({ setVisibility: (v) => d.setVisibility(v), x: p.x, z: p.z, intact: d.state === 'intact' });
+    }
+    for (const t of this.towers) {
+      out.push({ setVisibility: (v) => t.setVisibility(v), x: t.centerX, z: t.centerZ, intact: t.state === 'intact' });
+    }
+    for (const tr of this.trees) {
+      out.push({ setVisibility: (v) => tr.setVisibility(v), x: tr.fogX, z: tr.fogZ, intact: tr.state === 'intact' });
+    }
+    for (const f of this.fences) {
+      out.push({ setVisibility: (v) => f.setVisibility(v), x: f.fogX, z: f.fogZ, intact: f.state === 'intact' });
+    }
+    return out;
   }
 
   /**
@@ -305,12 +327,15 @@ export class DestructionSystem {
     start: { x: number; z: number },
     end: { x: number; z: number },
     count: number,
+    /** 可选:每根立柱的地形高度函数(贴地用)。不传则 y=0(兼容平面) */
+    heightFn?: (x: number, z: number) => number,
   ): void {
     for (let i = 0; i < count; i++) {
       const t = count === 1 ? 0.5 : i / (count - 1);
       const x = start.x + (end.x - start.x) * t;
       const z = start.z + (end.z - start.z) * t;
-      const p = new FencePost(this.physics, this.render, { x, y: 0, z });
+      const y = heightFn ? heightFn(x, z) : 0;
+      const p = new FencePost(this.physics, this.render, { x, y, z });
       this.fences.push(p);
       this.fenceByCollider.set(p.colliderHandle, p);
     }
@@ -822,10 +847,12 @@ export class DestructionSystem {
    * 与炮击完全共用 applyDamage → 撞击和炮击对每个可破坏物行为一致。
    */
   handleCollision(h1: number, h2: number): void {
-    if (this.ramCooldown > 0) return; // 冷却期内忽略,防连续碰撞重复扣血
     // 找参与碰撞的坦克(任意 controllableTank,不再只认玩家)
     const tank = this.tankByCollider.get(h1) ?? this.tankByCollider.get(h2);
     if (!tank || tank.state !== 'intact') return;
+    // 检查该坦克的撞击冷却(按坦克隔离,修复多坦克同时撞击时全局冷却丢事件)
+    const cd = this.ramCooldowns.get(tank);
+    if (cd !== undefined && cd > 0) return;
 
     // 撞击者水平速度(撞击力度来源)——用撞击者而非玩家,修复 NPC 撞玩家误用玩家速度
     const v = tank.body.linvel();
@@ -852,14 +879,19 @@ export class DestructionSystem {
     const damage = CONFIG.destruction.hitDamage * ramScale;
     // 撞击半径比爆炸小(贴身撞击)
     const radius = CONFIG.destruction.explosionRadius * 0.6;
-    this.ramCooldown = 0.2; // 0.2s 冷却
+    this.ramCooldowns.set(tank, 0.2); // 0.2s 冷却(按坦克隔离)
     // exclude 撞击者:撞击爆炸不伤自己(否则玩家撞树会炸到自己)
     this.applyDamage({ x: t.x, y: t.y, z: t.z }, radius, damage, tank);
   }
 
   /** 每帧更新碎片寿命/淡出(砖块由物理同步，不需更新) + 撞击冷却 + 所有可附身坦克冒烟 */
   update(dt: number): void {
-    if (this.ramCooldown > 0) this.ramCooldown -= dt;
+    // 递减所有坦克的撞击冷却,清理已过期的(按坦克隔离,防 Map 无限增长)
+    for (const [tank, cd] of this.ramCooldowns) {
+      const newCd = cd - dt;
+      if (newCd <= 0) this.ramCooldowns.delete(tank);
+      else this.ramCooldowns.set(tank, newCd);
+    }
     this.fragments = this.fragments.filter((f) => {
       if (f.update(dt)) return true;
       f.dispose(this.physics, this.render);
@@ -880,7 +912,7 @@ export class DestructionSystem {
     const cfg = CONFIG.destruction.armor;
     const q = tank.body.rotation();
     // 从四元数计算车身偏航角
-    const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.x * q.x));
+    const yaw = Math.atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.y * q.y + q.z * q.z));
     const dx = epicenter.x - tank.body.translation().x;
     const dz = epicenter.z - tank.body.translation().z;
     // 将冲击方向转到坦克局部坐标系
@@ -924,6 +956,9 @@ export class DestructionSystem {
     for (const f of this.fences) if (f.state === 'intact') fences++;
     let resupply = 0;
     for (const rp of this.resupplyPoints) if (rp.state === 'intact') resupply++;
-    return { intact, fragments: this.fragments.length, bricks: this.bricks.length, towers, trees, fences, resupply };
+    // bricks 统计仍未活化的(fixed)砖块数,与其他诊断项一致(完好数而非总数)
+    let bricks = 0;
+    for (const b of this.bricks) if (b.body.bodyType() === RAPIER.RigidBodyType.Fixed) bricks++;
+    return { intact, fragments: this.fragments.length, bricks, towers, trees, fences, resupply };
   }
 }

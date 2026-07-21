@@ -1,0 +1,160 @@
+{
+  "hull": {
+    "bottomHalfX": 1.06,
+    "topHalfX": 0.9,
+    "bottomHalfZ": 2.15,
+    "topHalfZ": 1.65,
+    "height": 1.05,
+    "centerY": -0.05
+  },
+  "track": {
+    "halfX": 0.27,
+    "halfY": 0.3,
+    "halfZ": 2.05,
+    "offsetX": 0.88,
+    "centerY": -0.48,
+    "texRepeat": 6,
+    "rollScale": 1
+  },
+  "roadWheel": {
+    "count": 7,
+    "radius": 0.22,
+    "halfWidth": 0.1,
+    "offsetX": 0.66,
+    "centerY": -0.48,
+    "zSpan": 1.6
+  },
+  "fender": {
+    "halfX": 0.16,
+    "halfY": 0.025,
+    "halfZ": 2.1,
+    "offsetX": 0.88,
+    "centerY": -0.16
+  },
+  "turret": {
+    "offset": {
+      "x": 0,
+      "y": 0.48,
+      "z": -0.3
+    },
+    "armata": {
+      "bottomHalfX": 0.88,
+      "topHalfX": 0.6,
+      "bottomHalfZ": 1.05,
+      "topHalfZ": 0.85,
+      "halfY": 0.26,
+      "offsetY": 0.3,
+      "sightCmdr": {
+        "half": {
+          "x": 0.2,
+          "y": 0.13,
+          "z": 0.16
+        },
+        "offset": {
+          "x": 0,
+          "y": 0.46,
+          "z": -0.4
+        }
+      },
+      "sightGunner": {
+        "half": {
+          "x": 0.13,
+          "y": 0.11,
+          "z": 0.12
+        },
+        "offset": {
+          "x": 0.28,
+          "y": 0.42,
+          "z": 0.3
+        }
+      },
+      "rcws": {
+        "half": {
+          "x": 0.16,
+          "y": 0.09,
+          "z": 0.16
+        },
+        "offset": {
+          "x": 0.42,
+          "y": 0.42,
+          "z": 0.05
+        },
+        "barrelLen": 0.5,
+        "barrelRadius": 0.022
+      }
+    },
+    "afghanit": {
+      "radius": 0.045,
+      "height": 0.16,
+      "count": 5,
+      "offsetX": 0.88,
+      "zSpan": 0.7,
+      "offsetY": 0.2
+    },
+    "antenna": {
+      "radius": 0.014,
+      "length": 1,
+      "baseX": 0.6,
+      "baseY": 0.42,
+      "baseZ": -0.7,
+      "tilt": 0.3
+    }
+  },
+  "barrel": {
+    "offset": {
+      "x": 0,
+      "y": 0.28,
+      "z": 0.4
+    },
+    "length": 1.9,
+    "mantlet": {
+      "radius": 0.2,
+      "halfZ": 0.18
+    },
+    "fumeExtractor": {
+      "radius": 0.15,
+      "length": 0.4,
+      "posRatio": 0.66
+    },
+    "muzzleDevice": {
+      "radius": 0.13,
+      "length": 0.18
+    }
+  },
+  "stowage": {
+    "engineGrille": {
+      "count": 5,
+      "halfX": 0.5,
+      "halfY": 0.16,
+      "halfThick": 0.018,
+      "z": -2.1,
+      "y": 0
+    },
+    "driverHatch": {
+      "radius": 0.22,
+      "height": 0.1,
+      "x": 0,
+      "z": 1.5,
+      "y": 0.5
+    }
+  },
+  "colors": {
+    "hull": 4871477,
+    "turret": 4410672,
+    "camo": {
+      "base": 4871477,
+      "blobDark": 2764312,
+      "blobMid": 3686430,
+      "style": "nato-blotch",
+      "wear": 0.25
+    },
+    "number": "03",
+    "trackMetal": 2764083,
+    "wheelRubber": 1711135,
+    "wheelHub": 3816770,
+    "barrel": 3356477,
+    "mantlet": 3027255,
+    "detail": 1316377,
+    "fender": 4871204
+  }
+}

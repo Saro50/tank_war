@@ -1,6 +1,6 @@
 import type { PhysicsWorld } from '../../core/PhysicsWorld';
 import type { RenderScene } from '../../core/RenderScene';
-import type { NpcTier } from '../../config';
+import type { NpcTier, Team } from '../../config';
 import type { TankBase } from './TankBase';
 import { T14Tank } from './T14Tank';
 import { TigerTank } from './TigerTank';
@@ -26,18 +26,19 @@ export function createTank(
   render: RenderScene,
   spawn: { x: number; y: number; z: number },
   yaw: number,
+  team: Team,
   tier?: NpcTier,
 ): TankBase {
   switch (variant) {
     case 't14':
-      return new T14Tank(physics, render, spawn, yaw); // 玩家 T-14 无 tier(始终原配色)
+      return new T14Tank(physics, render, spawn, team, yaw); // 玩家 T-14 无 tier(始终原配色)
     case 'gltf':
       // 精细化美术资产(外部 glb)。GltfTankAsset 必须 main 启动时已 load。
-      return new GltfTank(physics, render, spawn, yaw);
+      return new GltfTank(physics, render, spawn, team, yaw);
     case 'tiger':
-      return new TigerTank(physics, render, spawn, yaw, tier);
+      return new TigerTank(physics, render, spawn, team, yaw, tier);
     case 'abrams':
-      return new AbramsTank(physics, render, spawn, yaw, tier);
+      return new AbramsTank(physics, render, spawn, team, yaw, tier);
     default:
       throw new Error(`unknown tank variant: ${variant}`);
   }

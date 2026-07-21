@@ -5,12 +5,14 @@ import {
   Group,
   Material,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
+  SphereGeometry,
   Texture,
   Vector3,
 } from 'three';
-import { CONFIG, type NpcTier } from '../../config';
+import { CONFIG, type NpcTier, type Team } from '../../config';
 import type { PhysicsWorld } from '../../core/PhysicsWorld';
 import type { RenderScene } from '../../core/RenderScene';
 import { SyncBridge } from '../../core/SyncBridge';
@@ -93,6 +95,9 @@ export abstract class TankBase implements IControllableTank {
   /** NPC 难度档位(仅 NPC 有;undefined=玩家/中立,走原配色)。构造注入,director 决定。 */
   readonly tier?: NpcTier;
 
+  /** 阵营(构造注入,所有坦克必有)。迷雾系统据此判定显隐(只隐藏 enemy)。 */
+  readonly team: Team;
+
   protected readonly spec: TankSpec;
   protected readonly physics: PhysicsWorld;
   protected readonly render: RenderScene;
@@ -101,10 +106,27 @@ export abstract class TankBase implements IControllableTank {
 
   private hp: number;
   private readonly startHp: number;
-  /** 最后受击时刻(performance.now 毫秒),脱战回血计时基准 */
-  private lastHitTime = 0;
+  /** 最后受击时刻(performance.now 毫秒),脱战回血计时基准。
+   *  初始 -1(哨兵):未受击时不触发脱战回血(避免 lastHitTime=0 时 performance.now()-0 为极大值导致立即回血) */
+  private lastHitTime = -1;
   private smoke?: Smoke;
+  /** scorch 前收集的纹理引用(scorch 会将 material.map 置 null,dispose 遍历 group 收集不到,需单独保存) */
+  private scorchTextures: Texture[] = [];
   private readonly explosions: Explosion[] = [];
+
+  // —— 技能视觉特效 ——
+  /** 装甲倾斜:蓝色半透能量护盾(opacity 呼吸)。
+   *  boost(过载)无车体特效——靠扬尘增强反馈(TankController.updateDust)。
+   *  scout(侦查)无车体特效——静默生效。 */
+  private armorVfx?: Mesh;
+  /** 特效动画时间累积(armor 呼吸用) */
+  private vfxTime = 0;
+  /**
+   *  子类设为 true 表示 geometry/texture 由外部(如 GltfTankAsset)共享管理,
+   *  dispose 时只释放独立 clone 的 material 和占位纹理,不释放共享的 geometry/glb 纹理。
+   *  修复:GltfTank 实例间共享 glb 几何/纹理,一个 dispose 释放会破坏其他实例渲染。
+   */
+  protected geometryIsShared = false;
   protected turretBody?: RAPIER.RigidBody;
   private readonly _barrelBaseZ: number;
   /** 调试命令 tw.hp 的安全上限:允许远超正常 maxHp,但拦截 Infinity/NaN/过大值避免日志 toFixed 异常 */
@@ -133,12 +155,13 @@ export abstract class TankBase implements IControllableTank {
     return this._barrelBaseZ;
   }
 
-  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, tier?: NpcTier) {
+  constructor(physics: PhysicsWorld, render: RenderScene, spawn: { x: number; y: number; z: number }, team: Team, tier?: NpcTier) {
     this.physics = physics;
     this.render = render;
     this.spec = this.getSpec();
     this.startHp = this.spec.damage.maxHp;
     this.hp = this.startHp;
+    this.team = team;
     this.tier = tier;
 
     // ---- 物理车身 ----
@@ -190,11 +213,18 @@ export abstract class TankBase implements IControllableTank {
     render.scene.add(this.group);
     SyncBridge.bind(this.body, this.group);
 
+    // 技能视觉特效(boost/armor/scout),初始隐藏,update 中按 status 显隐
+    this.buildSkillVfx();
+
     log.info('tank spawned', { name: this.name, spawn });
   }
 
   getHp(): number {
     return this.hp;
+  }
+
+  getMaxHp(): number {
+    return this.startHp;
   }
 
   /** 回血(M3 维修技能):clamp 到 maxHp;不影响脱战回血计时。被击毁无效。
@@ -335,7 +365,7 @@ export abstract class TankBase implements IControllableTank {
     const ratio = this.hp / this.startHp;
     if (ratio <= this.spec.damage.smokeThreshold) {
       this.ensureSmoke();
-      const intensity = 0.3 + 0.7 * (1 - ratio / this.spec.damage.smokeThreshold);
+      const intensity = Math.min(1, 0.3 + 0.7 * (1 - ratio / this.spec.damage.smokeThreshold));
       this.smoke!.setIntensity(intensity);
     }
     log.debug('tank hit', { name: this.name, hp: this.hp.toFixed(1), damage: damage.toFixed(1) });
@@ -367,8 +397,11 @@ export abstract class TankBase implements IControllableTank {
     this.group.add(this.smoke.group);
   }
 
-  /** 烧焦变黑：遍历 group 中所有 MeshStandardMaterial */
+  /** 烧焦变黑：遍历 group 中所有 MeshStandardMaterial。
+   *  修复:置 map=null 前先将纹理引用收集到 scorchTextures,供 dispose 释放(否则 dispose 遍历 group 时 map 已是 null,纹理全部泄漏) */
   protected scorch(): void {
+    // 被毁后隐藏护盾特效(焦黑车体上不应显示蓝色护盾)
+    if (this.armorVfx) this.armorVfx.visible = false;
     this.group.traverse((obj) => {
       const mesh = obj as Mesh;
       if (!mesh.isMesh) return;
@@ -377,6 +410,8 @@ export abstract class TankBase implements IControllableTank {
         const sm = mm as MeshStandardMaterial;
         if (!sm.isMaterial) return;
         if ((sm as unknown as { isMeshStandardMaterial?: boolean }).isMeshStandardMaterial) {
+          // 置 null 前保存纹理引用,供 dispose 释放
+          if (sm.map) this.scorchTextures.push(sm.map);
           sm.map = null;
           sm.color.setHex(0x141414);
           sm.roughness = 0.98;
@@ -391,7 +426,27 @@ export abstract class TankBase implements IControllableTank {
     });
   }
 
-  /** 每帧更新：状态聚合层推进 + 脱战回血 + 烟 + 击毁爆炸粒子 */
+  /**
+   * 构建技能视觉特效(仅 armor)。
+   * ------------------------------------------------------------
+   * boost(过载)无车体特效——靠扬尘增强反馈(TankController.updateDust 加大 spawnPerMeter)。
+   * scout(侦查)无车体特效——静默生效(仅 FogOfWarSystem 视野扩大)。
+   * armor(装甲):蓝色半透球壳,激活时 opacity 呼吸波动(能量护盾感)。
+   */
+  private buildSkillVfx(): void {
+    const bh = this.spec.bodyHalf;
+    // armor: 蓝色半透球壳(包裹车身,能量护盾)
+    const armorR = Math.max(bh.x, bh.z) + 0.4;
+    const armorGeo = new SphereGeometry(armorR, 16, 10);
+    const armorMat = new MeshBasicMaterial({
+      color: 0x4a8aff, transparent: true, opacity: 0.12, depthWrite: false,
+    });
+    this.armorVfx = new Mesh(armorGeo, armorMat);
+    this.armorVfx.visible = false;
+    this.group.add(this.armorVfx);
+  }
+
+  /** 每帧更新：状态聚合层推进 + 技能特效 + 烟 + 击毁爆炸粒子 */
   update(dt: number): void {
     // 状态层推进(无论 intact/destroyed:destroyed 后 effect 自然到期清空,无副作用且代码最简)
     this.status.update(dt);
@@ -402,10 +457,22 @@ export abstract class TankBase implements IControllableTank {
       reg.regenRate !== undefined &&
       this.state === 'intact' &&
       this.hp < this.startHp &&
+      this.lastHitTime > 0 && // 未受击(lastHitTime=-1 哨兵)不触发回血
       performance.now() - this.lastHitTime > reg.regenDelay * 1000
     ) {
       this.hp = Math.min(this.startHp, this.hp + reg.regenRate * dt);
     }
+    // 技能视觉特效(仅 armor:蓝色护盾呼吸)
+    this.vfxTime += dt;
+    if (this.armorVfx) {
+      const on = this.status.hasEffect('armor');
+      this.armorVfx.visible = on;
+      if (on) {
+        // opacity 呼吸波动(能量护盾呼吸感)
+        (this.armorVfx.material as MeshBasicMaterial).opacity = 0.10 + 0.06 * Math.sin(this.vfxTime * 4);
+      }
+    }
+
     if (this.smoke) this.smoke.update(dt);
     for (let i = this.explosions.length - 1; i >= 0; i--) {
       const e = this.explosions[i];
@@ -421,10 +488,34 @@ export abstract class TankBase implements IControllableTank {
     this.physics.world.removeRigidBody(this.body);
     this.render.scene.remove(this.group);
 
+    // 如果炮塔被 blowTurret 移到了 render.scene(StaticTankBase 被毁时),
+    // 需要单独遍历 turret 子树收集资源(group.traverse 不含已移出的 turret)
+    const geos = new Set<BufferGeometry>();
+    const mats = new Set<Material>();
+    const texs = new Set<Texture>();
+    const collectSubtree = (root: Object3D): void => {
+      root.traverse((obj) => {
+        const mesh = obj as Mesh;
+        if (!mesh.isMesh) return;
+        if (mesh.geometry) geos.add(mesh.geometry);
+        const m = mesh.material;
+        const collect = (mm: Material): void => {
+          mats.add(mm);
+          const map = (mm as { map?: Texture }).map;
+          if (map) texs.add(map);
+        };
+        if (Array.isArray(m)) for (const mm of m) collect(mm);
+        else if (m) collect(m);
+      });
+    };
+    collectSubtree(this.group);
+
     if (this.turretBody) {
       SyncBridge.unbind(this.turretBody);
       this.physics.world.removeRigidBody(this.turretBody);
       this.turretBody = undefined;
+      // turret 已被 blowTurret 移出 group,单独遍历其子树收集资源
+      collectSubtree(this.turret);
       this.render.scene.remove(this.turret);
     }
 
@@ -435,24 +526,23 @@ export abstract class TankBase implements IControllableTank {
       this.smoke = undefined;
     }
 
-    const geos = new Set<BufferGeometry>();
-    const mats = new Set<Material>();
-    const texs = new Set<Texture>();
-    this.group.traverse((obj) => {
-      const mesh = obj as Mesh;
-      if (!mesh.isMesh) return;
-      if (mesh.geometry) geos.add(mesh.geometry);
-      const m = mesh.material;
-      const collect = (mm: Material): void => {
-        mats.add(mm);
-        const map = (mm as { map?: Texture }).map;
-        if (map) texs.add(map);
-      };
-      if (Array.isArray(m)) for (const mm of m) collect(mm);
-      else if (m) collect(m);
-    });
-    for (const t of texs) t.dispose();
+    // 释放 scorch 前收集的纹理(scorch 已将 map 置 null,group 遍历收集不到)
+    for (const t of this.scorchTextures) texs.add(t);
+    this.scorchTextures.length = 0;
+    // 释放履带纹理(实例字段,可能不在 mesh.material.map 上——如 GltfTank 占位纹理)
+    texs.add(this.leftTrackTex);
+    texs.add(this.rightTrackTex);
+
+    // material 总是独立 clone(GltfTankAsset.cloneWithIndependentMaterials),可安全释放
     for (const m of mats) m.dispose();
-    for (const g of geos) g.dispose();
+    // geometry/texture:共享资源(GltfTankAsset 的 glb 几何/纹理)由 Asset 统一管理,不释放
+    if (!this.geometryIsShared) {
+      for (const t of texs) t.dispose();
+      for (const g of geos) g.dispose();
+    } else {
+      // GltfTank:只释放独立的占位纹理(履带 placeholder),不释放共享的 glb 纹理
+      this.leftTrackTex.dispose();
+      this.rightTrackTex.dispose();
+    }
   }
 }

@@ -34,6 +34,16 @@ interface Block {
 
 export class Tower {
   state: 'intact' | 'destroyed' = 'intact';
+
+  /** 迷雾显隐:遍历所有 block mesh + 地基 mesh 切 visible(Tower 由多块组成,无单一根) */
+  setVisibility(v: boolean): void {
+    for (const b of this.blocks) b.mesh.visible = v;
+    if (this.baseMesh) this.baseMesh.visible = v;
+  }
+
+  /** 位置(供迷雾判定格子)。Tower 无统一 body,用 center */
+  get centerX(): number { return this.center.x; }
+  get centerZ(): number { return this.center.z; }
   private readonly physics: PhysicsWorld;
   private readonly render: RenderScene;
   private readonly center: { x: number; y: number; z: number };
